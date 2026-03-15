@@ -32,4 +32,4 @@ learning experience.
 
 ---
 
-*Built for [Hackathon Name] · Powered by Gemini*
+*Built for Gemini Live Agent Challenge · Powered by Gemini*
