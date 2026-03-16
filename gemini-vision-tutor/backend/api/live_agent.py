@@ -1,12 +1,16 @@
 """
 Live Agent - Proxies browser audio/video to Gemini Live API
-Fixes applied:
-  1. Audio batching — buffers 300ms of PCM before sending to Gemini
-     (AudioWorklet sends every 8ms; Gemini cannot handle that rate)
-  2. Keepalive — sends a silent audio ping every 10s when mic is idle
-     (prevents the "keepalive ping timeout" crash)
-  3. Reconnect — if the Gemini session drops, reconnects up to 3 times
-     without dropping the browser WebSocket
+
+Fixes in this version:
+  1. All writes to Gemini go through a single gemini_send_queue handled
+     by one gemini_sender task — eliminates concurrent send races that
+     caused keepalive to silently fail and the session to timeout.
+  2. keepalive_producer is a lightweight task that only puts messages
+     onto the queue — it never touches the session directly.
+  3. msg_queue is drained on every reconnect so stale audio from before
+     the drop doesn't flood the new Gemini session (was causing the long
+     delay on second unmute).
+  4. Reconnect signals frontend via "reconnected" so mic restarts cleanly.
 """
 
 import asyncio
@@ -15,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google import genai
@@ -25,20 +30,14 @@ router = APIRouter()
 
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
-# How many PCM bytes to accumulate before sending to Gemini.
-# 16000 Hz × 2 bytes × 0.3 s = 9600 bytes ≈ 300ms of audio.
-# This rate is well within Gemini's limits while still feeling real-time.
-AUDIO_BATCH_BYTES = 9600
-
-# Send a silent heartbeat to Gemini if no real audio arrives for this long.
-# Keeps the underlying WebSocket alive during pauses in speech.
-KEEPALIVE_INTERVAL_S = 10.0
-
-# 80ms of silence (16000 Hz, mono, int16) = 1280 samples = 2560 bytes
-SILENCE_BYTES = bytes(2560)
-
-# Max times to transparently reconnect to Gemini before giving up
-MAX_RECONNECTS = 3
+AUDIO_BATCH_BYTES    = 3200        # 100ms @ 16kHz int16
+# Gemini's infrastructure closes the WS after ~40s of no audio.
+# We prevent this by streaming silence continuously at 100ms intervals
+# whenever the mic is idle. This is the only reliable keepalive method
+# with the Google GenAI SDK (we can't set ping_interval directly).
+SILENCE_INTERVAL_S   = 0.1         # send silence every 100ms when mic idle
+SILENCE_CHUNK        = bytes(3200) # 100ms of silence @ 16kHz int16
+MAX_RECONNECTS       = 3
 
 SYSTEM_PROMPT = """You are an expert, encouraging AI tutor helping a student with their homework.
 You can see the student's camera and hear their voice in real time.
@@ -59,6 +58,11 @@ LIVE_CONFIG = types.LiveConnectConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(
                 voice_name="Zephyr"
             )
+        )
+    ),
+    realtime_input_config=types.RealtimeInputConfig(
+        automatic_activity_detection=types.AutomaticActivityDetection(
+            disabled=True,
         )
     ),
     system_instruction=SYSTEM_PROMPT,
@@ -90,15 +94,20 @@ async def live_agent_websocket(websocket: WebSocket):
         except Exception:
             pass
 
-    # ── Shared state between tasks ────────────────────────────────────────
-    # Incoming messages from the browser are queued here so browser_to_gemini
-    # can be restarted on reconnect without losing messages.
-    msg_queue: asyncio.Queue = asyncio.Queue()
+    # ── Shared queues and state ───────────────────────────────────────────
+    # msg_queue   : raw messages from the browser (audio, image, text)
+    # gemini_send_queue : serialised outbound sends to Gemini
+    # Both are recreated on reconnect to avoid stale data.
+    msg_queue:         asyncio.Queue = asyncio.Queue()
+    gemini_send_queue: asyncio.Queue = asyncio.Queue()
     stop_event = asyncio.Event()
+    last_audio_time = [time.monotonic()]
+    interrupt_cooldown   = [0.0]   # timestamp of last interrupt
+    reset_speech_active  = [False] # signal browser_to_queue to reset speech state
+    waiting_for_response = [False] # True after activity_end, False after turn_complete
 
-    # ── Browser receiver — runs once for the whole session ────────────────
+    # ── Browser receiver — single long-lived task ─────────────────────────
     async def receive_from_browser():
-        """Read browser WebSocket and push messages onto msg_queue."""
         try:
             while not stop_event.is_set():
                 try:
@@ -109,9 +118,7 @@ async def live_agent_websocket(websocket: WebSocket):
                         break
                     await msg_queue.put(msg)
                 except asyncio.TimeoutError:
-                    # No message for 30s — put a keepalive marker so the
-                    # Gemini sender loop can send a silence ping
-                    await msg_queue.put({"type": "_keepalive"})
+                    pass  # normal during silence, keepalive handles Gemini side
         except WebSocketDisconnect:
             logger.info("Browser disconnected")
             stop_event.set()
@@ -119,29 +126,63 @@ async def live_agent_websocket(websocket: WebSocket):
             logger.error(f"receive_from_browser error: {e}")
             stop_event.set()
 
-    # ── Gemini session runner — reconnects on failure ─────────────────────
+    # ── Drain stale messages before each new Gemini session ───────────────
+    def drain_queues():
+        """
+        FIX 3: Clear both queues when reconnecting.
+        Without this, audio buffered during the dropout floods the new
+        Gemini session all at once, causing a long silence before it
+        can process the backlog and respond.
+        """
+        drained = 0
+        while not msg_queue.empty():
+            try:
+                msg_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+        while not gemini_send_queue.empty():
+            try:
+                gemini_send_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+        if drained:
+            logger.info(f"Drained {drained} stale messages before reconnect")
+
+    # ── Gemini session runner ─────────────────────────────────────────────
     async def run_gemini_session():
         reconnects = 0
         while not stop_event.is_set():
+            # FIX 3: Always drain before connecting so the new session
+            # starts clean regardless of what was buffered.
+            drain_queues()
+            last_audio_time[0] = time.monotonic()
+
             try:
                 async with client.aio.live.connect(
                     model=LIVE_MODEL,
                     config=LIVE_CONFIG,
                 ) as session:
                     logger.info(f"Gemini Live session opened ✓ (attempt {reconnects + 1})")
+
                     if reconnects == 0:
                         await send({
                             "type": "connected",
                             "message": "Live session ready — turn on mic and speak!"
                         })
                     else:
-                        # Silent reconnect — don't interrupt the student
-                        logger.info("Reconnected to Gemini transparently")
+                        logger.info("Reconnected to Gemini — notifying frontend")
+                        await send({"type": "reconnected"})
 
-                    reconnects = 0  # Reset counter on successful connect
+                    reconnects = 0
 
+                    # FIX 1: All four tasks share the session but only
+                    # gemini_sender ever calls session.send_* — no races.
                     await asyncio.gather(
-                        browser_to_gemini(session),
+                        browser_to_queue(),
+                        keepalive_producer(),
+                        gemini_sender(session),
                         gemini_to_browser(session),
                     )
 
@@ -155,100 +196,229 @@ async def live_agent_websocket(websocket: WebSocket):
                     await send({"type": "error", "message": "Lost connection to Gemini — please refresh."})
                     stop_event.set()
                     break
-                wait = 2 ** reconnects  # exponential backoff: 2s, 4s, 8s
+                wait = 2 ** reconnects
                 logger.info(f"Reconnecting in {wait}s...")
                 await asyncio.sleep(wait)
 
-    # ── Send browser messages → Gemini, with batching + keepalive ─────────
-    async def browser_to_gemini(session):
-        audio_buf = bytearray()
-        last_audio_time = asyncio.get_event_loop().time()
+    # ── browser_to_queue — reads msg_queue, pushes to gemini_send_queue ───
+    async def browser_to_queue():
+        # Auto speech detection — sends activity_start/end to Gemini
+        # based on audio energy, no user button clicking needed.
+        import struct as _struct
+        speech_active    = False
+        last_speech_time = [time.monotonic()]
+        SPEECH_RMS       = 600   # int16 RMS above this = speech
+        SILENCE_SECS     = 1.2   # silence after speech = end of turn
+
+        async def silence_watcher():
+            nonlocal speech_active
+            while not stop_event.is_set():
+                await asyncio.sleep(0.15)
+                # Handle interrupt reset — abandon current activity window
+                if reset_speech_active[0]:
+                    reset_speech_active[0] = False
+                    if speech_active:
+                        speech_active = False
+                        logger.info("Speech window abandoned due to interrupt — not sending activity_end")
+                    continue
+                if speech_active:
+                    if time.monotonic() - last_speech_time[0] > SILENCE_SECS:
+                        speech_active = False
+                        await gemini_send_queue.put(("activity_end", None))
+                        logger.info("activity_end — user stopped talking")
+
+        asyncio.ensure_future(silence_watcher())
 
         try:
             while not stop_event.is_set():
-                # Drain the queue with a short timeout so we can flush
-                # the audio buffer even if no new messages arrive
                 try:
-                    msg = await asyncio.wait_for(msg_queue.get(), timeout=0.1)
+                    msg = await asyncio.wait_for(msg_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
-                    msg = None
+                    continue
 
-                now = asyncio.get_event_loop().time()
+                msg_type = msg.get("type")
 
-                if msg is not None:
-                    msg_type = msg.get("type")
+                if msg_type == "audio":
+                    pcm_bytes = base64.b64decode(msg.get("data", ""))
+                    last_audio_time[0] = time.monotonic()
 
-                    if msg_type == "audio":
-                        pcm_bytes = base64.b64decode(msg.get("data", ""))
-                        audio_buf.extend(pcm_bytes)
-                        last_audio_time = now
+                    # Compute RMS from int16 samples
+                    n = len(pcm_bytes) // 2
+                    if n > 0:
+                        samples = _struct.unpack(f"{n}h", pcm_bytes[:n*2])
+                        rms = (sum(s*s for s in samples) / n) ** 0.5
+                        if rms > SPEECH_RMS:
+                            last_speech_time[0] = time.monotonic()
+                            if not speech_active:
+                                cooldown_elapsed = time.monotonic() - interrupt_cooldown[0]
+                                if cooldown_elapsed >= 1.5 and not waiting_for_response[0]:
+                                    speech_active = True
+                                    await gemini_send_queue.put(("activity_start", None))
+                                    logger.info(f"activity_start — rms={rms:.0f}")
+                                elif waiting_for_response[0]:
+                                    logger.debug("activity_start blocked — waiting for Gemini response")
 
-                        # FIX 1: Only send when we have 300ms of audio batched.
-                        # AudioWorklet fires every ~8ms; sending every chunk
-                        # floods Gemini and triggers the keepalive timeout.
-                        if len(audio_buf) >= AUDIO_BATCH_BYTES:
-                            await session.send_realtime_input(
-                                audio=types.Blob(
-                                    mime_type="audio/pcm;rate=16000",
-                                    data=bytes(audio_buf),
-                                )
-                            )
-                            audio_buf.clear()
+                    # Only send audio to Gemini inside an active speech window.
+                    # Audio sent outside activity_start/end confuses Gemini
+                    # and causes it to silently ignore subsequent turns.
+                    if speech_active:
+                        await gemini_send_queue.put(("audio", pcm_bytes))
 
-                    elif msg_type == "image":
-                        # Flush any pending audio first so ordering is correct
-                        if audio_buf:
-                            await session.send_realtime_input(
-                                audio=types.Blob(
-                                    mime_type="audio/pcm;rate=16000",
-                                    data=bytes(audio_buf),
-                                )
-                            )
-                            audio_buf.clear()
+                elif msg_type == "image":
+                    img_b64 = msg.get("data", "")
+                    if img_b64:
+                        if "," in img_b64:
+                            img_b64 = img_b64.split(",", 1)[1]
+                        await gemini_send_queue.put(("image", base64.b64decode(img_b64)))
 
-                        img_b64 = msg.get("data", "")
-                        if img_b64:
-                            if "," in img_b64:
-                                img_b64 = img_b64.split(",", 1)[1]
-                            await session.send_realtime_input(
-                                video=types.Blob(
-                                    mime_type="image/jpeg",
-                                    data=base64.b64decode(img_b64),
-                                )
-                            )
-
-                    elif msg_type == "text":
-                        text = msg.get("text", "")
-                        if text:
-                            await session.send_client_content(
-                                turns=types.Content(
-                                    role="user",
-                                    parts=[types.Part(text=text)]
-                                ),
-                                turn_complete=True,
-                            )
-
-                    elif msg_type == "_keepalive":
-                        pass  # handled below
-
-                # FIX 2: Keepalive — if no real audio for KEEPALIVE_INTERVAL_S,
-                # send a tiny silence blob so Gemini's WS ping doesn't time out.
-                if now - last_audio_time >= KEEPALIVE_INTERVAL_S:
-                    logger.debug("Sending keepalive silence to Gemini")
-                    await session.send_realtime_input(
-                        audio=types.Blob(
-                            mime_type="audio/pcm;rate=16000",
-                            data=SILENCE_BYTES,
-                        )
-                    )
-                    last_audio_time = now
+                elif msg_type == "text":
+                    text = msg.get("text", "")
+                    if text:
+                        await gemini_send_queue.put(("text", text))
 
         except Exception as e:
             if not stop_event.is_set():
-                logger.error(f"browser_to_gemini error: {e}", exc_info=True)
-            raise  # Let run_gemini_session handle reconnect
+                logger.error(f"browser_to_queue error: {e}", exc_info=True)
+            raise
 
-    # ── Receive Gemini responses → browser ────────────────────────────────
+    # ── silence_streamer — sends silence continuously when mic is idle ──────
+    async def keepalive_producer():
+        """
+        Streams silence to Gemini every 100ms whenever no real audio is
+        flowing. This is the only reliable way to prevent Gemini's
+        infrastructure-level ping timeout (~40s) with the GenAI SDK,
+        since we cannot set ping_interval on the underlying websocket.
+        The silence is low-energy enough that Gemini's VAD ignores it.
+        """
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(SILENCE_INTERVAL_S)
+                # Send silence for keepalive — but only when NOT in an
+                # active speech window. During speech, real audio is flowing.
+                # We check gemini_send_queue size as a proxy — if it has
+                # many items, speech is active and silence is not needed.
+                if gemini_send_queue.qsize() < 5:
+                    await gemini_send_queue.put(("silence", None))
+        except Exception as e:
+            if not stop_event.is_set():
+                logger.error(f"keepalive_producer error: {e}")
+            raise
+
+    # ── gemini_sender — the ONLY task that writes to session ─────────────
+    async def gemini_sender(session):
+        """
+        FIX 1: Single owner of all session.send_* calls.
+        Batches audio to 300ms chunks before sending.
+        Handles silence, image, and text inline.
+        """
+        audio_buf = bytearray()
+        try:
+            while not stop_event.is_set():
+                try:
+                    kind, data = await asyncio.wait_for(
+                        gemini_send_queue.get(), timeout=0.3
+                    )
+                except asyncio.TimeoutError:
+                    # Flush any partial audio buffer that's been waiting
+                    if audio_buf:
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                mime_type="audio/pcm;rate=16000",
+                                data=bytes(audio_buf),
+                            )
+                        )
+                        audio_buf.clear()
+                    continue
+
+                if kind == "audio":
+                    audio_buf.extend(data)
+
+                    if len(audio_buf) >= AUDIO_BATCH_BYTES:
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                mime_type="audio/pcm;rate=16000",
+                                data=bytes(audio_buf),
+                            )
+                        )
+                        audio_buf.clear()
+
+                elif kind == "activity_start":
+                    await session.send_realtime_input(
+                        activity_start=types.ActivityStart()
+                    )
+                    logger.info("activity_start sent to Gemini")
+
+                elif kind == "activity_end":
+                    if audio_buf:
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                mime_type="audio/pcm;rate=16000",
+                                data=bytes(audio_buf),
+                            )
+                        )
+                        audio_buf.clear()
+                    await session.send_realtime_input(
+                        activity_end=types.ActivityEnd()
+                    )
+                    waiting_for_response[0] = True
+                    logger.info("activity_end sent to Gemini — waiting for response")
+
+                elif kind == "end_of_speech":
+                    if audio_buf:
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                mime_type="audio/pcm;rate=16000",
+                                data=bytes(audio_buf),
+                            )
+                        )
+                        audio_buf.clear()
+
+
+
+                elif kind == "silence":
+                    # Send silence only if no real audio is buffered
+                    if not audio_buf:
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                mime_type="audio/pcm;rate=16000",
+                                data=SILENCE_CHUNK,
+                            )
+                        )
+
+                elif kind == "image":
+                    # Flush audio before image for correct ordering
+                    if audio_buf:
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                mime_type="audio/pcm;rate=16000",
+                                data=bytes(audio_buf),
+                            )
+                        )
+                        audio_buf.clear()
+                    await session.send_realtime_input(
+                        video=types.Blob(
+                            mime_type="image/jpeg",
+                            data=data,
+                        )
+                    )
+
+                elif kind == "text":
+                    await session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(text=data)]
+                        ),
+                        turn_complete=True,
+                    )
+
+
+
+        except Exception as e:
+            if not stop_event.is_set():
+                logger.error(f"gemini_sender error: {e}", exc_info=True)
+            raise
+
+    # ── Gemini → Browser ──────────────────────────────────────────────────
     async def gemini_to_browser(session):
         try:
             async for response in session.receive():
@@ -264,11 +434,17 @@ async def live_agent_websocket(websocket: WebSocket):
 
                     if sc.interrupted:
                         await send({"type": "interrupted"})
-                        logger.info("Gemini interrupted by student")
+                        await send({"type": "gate_reset"})
+                        interrupt_cooldown[0]   = time.monotonic()
+                        reset_speech_active[0]  = True
+                        waiting_for_response[0] = False
+                        logger.info("Gemini interrupted — resetting speech state, 1.5s cooldown")
 
                     if sc.turn_complete:
                         await send({"type": "turn_complete"})
-                        logger.info("Gemini turn complete")
+                        waiting_for_response[0] = False
+                        interrupt_cooldown[0]   = time.monotonic()  # full 1.5s cooldown
+                        logger.info("Gemini turn complete — ready for next question")
 
                     if sc.model_turn and sc.model_turn.parts:
                         for part in sc.model_turn.parts:
@@ -281,7 +457,7 @@ async def live_agent_websocket(websocket: WebSocket):
             if not stop_event.is_set():
                 logger.error(f"gemini_to_browser error: {e}", exc_info=True)
                 await send({"type": "error", "message": str(e)})
-            raise  # Let run_gemini_session handle reconnect
+            raise
 
     # ── Run everything ────────────────────────────────────────────────────
     try:
