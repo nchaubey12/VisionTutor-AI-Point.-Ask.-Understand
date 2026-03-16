@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import ssl
+import certifi
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from websockets import connect as ws_connect
@@ -20,7 +22,6 @@ GEMINI_WS_URI = (
     "?key={api_key}"
 )
 
-# ✅ Fixed: correct model name for free-tier API keys
 GEMINI_MODEL   = "gemini-2.5-flash-native-audio-latest"
 MAX_RECONNECTS = 3
 
@@ -53,11 +54,63 @@ SETUP_MESSAGE = {
     }
 }
 
+# ── Thinking phrases Gemini 2.5 emits before the actual response ─────────────
+_THINKING_PREFIXES = (
+    # I + verb patterns
+    "i've crafted", "i'm crafting", "i'm now", "i'm going to",
+    "i'm aiming", "i'm hoping", "i'm gently", "i'm formulating",
+    "i'm preparing", "i'm thinking", "i'm focusing", "i'm working",
+    "i'm considering", "i'm planning", "i'm ready", "i'm standing",
+    "i'm patiently", "i'm maintaining", "i'm registering", "i'm trying",
+    "i'm interpreting", "i'm responding", "i'm deciding", "i've decided",
+    "i'm keeping", "i'm noting", "i'm noticing", "i noticed",
+    "i need to", "i should", "i will now", "i will maintain",
+    "i'll make sure", "i'll keep", "i'll respond", "i'll use",
+    "i'll maintain", "i'll check", "i'll address", "i'll provide",
+    "i've got it", "i've registered", "i've begun",
+    # let me / my
+    "let me think", "let me formulate", "let me craft",
+    "my response", "my plan", "my approach", "my goal", "my aim",
+    # the user
+    "the user wants", "the user is", "the user hasn't",
+    "the user asked", "the user said", "the user seems",
+    "the user spoke", "the user switched",
+    # there's / there is
+    "there's chatter", "there is chatter",
+    # the tone / the response
+    "the tone will", "the tone is", "the tone should",
+    "this is a", "this response", "this seems",
+    # therefore / now
+    "therefore, i", "therefore i",
+    "now, i'm", "now i'm", "now i'll", "now, i'll",
+    # miscellaneous reasoning phrases
+    "it seems", "it appears", "it looks like",
+)
+
+
+def _is_thinking(sentence: str) -> bool:
+    lower = sentence.strip().lower()
+    return any(lower.startswith(p) for p in _THINKING_PREFIXES)
+
 
 def _filter_thinking(text: str) -> str:
-    text = re.sub(r'\*\*[^*]+\*\*\s*', '', text)
-    lines = [l for l in text.split('\n') if l.strip()]
-    return ' '.join(lines).strip()
+    """
+    Gemini 2.5 leaks internal reasoning as plain prose.
+    Strategy: split into sentences, drop thinking ones.
+    If the whole block is thinking, return empty string.
+    """
+    text = re.sub(r'\*\*[^*]+\*\*\s*', '', text).strip()
+    if not text:
+        return ""
+
+    # Split on sentence boundaries
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    kept = [s.strip() for s in sentences if s.strip() and not _is_thinking(s)]
+
+    result = " ".join(kept).strip()
+    if result != text:
+        logger.debug(f"Filter: [{text[:60]}] → [{result[:60]}]")
+    return result
 
 
 @router.websocket("/ws/live")
@@ -72,6 +125,8 @@ async def live_agent_websocket(websocket: WebSocket):
         return
 
     gemini_uri = GEMINI_WS_URI.format(api_key=api_key)
+
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     async def send(data: dict):
         try:
@@ -119,8 +174,10 @@ async def live_agent_websocket(websocket: WebSocket):
             try:
                 async with ws_connect(
                     gemini_uri,
-                    extra_headers={"Content-Type": "application/json"},
+                    ssl=ssl_context,
+                    additional_headers={"Content-Type": "application/json"},
                 ) as gemini_ws:
+
                     logger.info(f"Gemini WS connected (attempt {reconnects + 1})")
 
                     await gemini_ws.send(json.dumps(SETUP_MESSAGE))
@@ -143,12 +200,15 @@ async def live_agent_websocket(websocket: WebSocket):
             except Exception as e:
                 if stop_event.is_set():
                     break
+
                 reconnects += 1
                 logger.error(f"Gemini session error (attempt {reconnects}): {e}", exc_info=True)
+
                 if reconnects >= MAX_RECONNECTS:
                     await send({"type": "error", "message": "Lost connection to Gemini — please refresh."})
                     stop_event.set()
                     break
+
                 wait = 2 ** reconnects
                 logger.info(f"Reconnecting in {wait}s...")
                 await asyncio.sleep(wait)
@@ -178,6 +238,7 @@ async def live_agent_websocket(websocket: WebSocket):
                     img_b64 = msg.get("data", "")
                     if img_b64 and "," in img_b64:
                         img_b64 = img_b64.split(",", 1)[1]
+
                     if img_b64:
                         payload = {
                             "realtime_input": {
@@ -200,7 +261,6 @@ async def live_agent_websocket(websocket: WebSocket):
                         }
                         await gemini_ws.send(json.dumps(payload))
 
-                # ✅ Handle stopAudio — signals end of user turn so Gemini responds
                 elif msg_type == "stopAudio":
                     payload = {
                         "realtime_input": {
@@ -221,6 +281,7 @@ async def live_agent_websocket(websocket: WebSocket):
     async def gemini_to_browser(gemini_ws):
         try:
             async for raw in gemini_ws:
+
                 if stop_event.is_set():
                     break
 
@@ -229,49 +290,26 @@ async def live_agent_websocket(websocket: WebSocket):
                 except json.JSONDecodeError:
                     continue
 
-                # Audio / text parts
                 try:
                     parts = response["serverContent"]["modelTurn"]["parts"]
+
                     for part in parts:
                         if "inlineData" in part:
-                            await send({"type": "audio", "data": part["inlineData"]["data"]})
-                        elif "text" in part:
-                            clean = _filter_thinking(part["text"])
-                            if clean:
-                                await send({"type": "text", "text": clean})
+                            await send({
+                                "type": "audio",
+                                "data": part["inlineData"]["data"]
+                            })
+                        # Intentionally skip text parts — Gemini 2.5 leaks
+                        # internal reasoning as text which we cannot reliably filter.
+                        # Audio is the response; text is just thinking noise.
+
                 except (KeyError, TypeError):
                     pass
 
-                # Input transcription (what user said)
+                # Signal turn complete when server marks it
                 try:
-                    input_text = response["serverContent"]["inputTranscription"]["text"]
-                    if input_text:
-                        await send({"type": "input_transcription", "text": input_text})
-                except (KeyError, TypeError):
-                    pass
-
-                # Output transcription (what Gemini is saying)
-                try:
-                    output_text = response["serverContent"]["outputTranscription"]["text"]
-                    if output_text:
-                        await send({"type": "output_transcription", "text": output_text})
-                except (KeyError, TypeError):
-                    pass
-
-                # Turn complete
-                try:
-                    if response["serverContent"].get("turnComplete"):
+                    if response.get("serverContent", {}).get("turnComplete"):
                         await send({"type": "turn_complete"})
-                        logger.info("Gemini turn complete")
-                except (KeyError, TypeError):
-                    pass
-
-                # Interrupted
-                try:
-                    if response["serverContent"].get("interrupted"):
-                        await send({"type": "interrupted"})
-                        await send({"type": "gate_reset"})
-                        logger.info("Gemini interrupted")
                 except (KeyError, TypeError):
                     pass
 
@@ -286,14 +324,17 @@ async def live_agent_websocket(websocket: WebSocket):
             receive_from_browser(),
             run_gemini_session(),
         )
+
     except WebSocketDisconnect:
         logger.info("Live WebSocket disconnected cleanly")
+
     except Exception as e:
         logger.error(f"Live agent top-level error: {e}", exc_info=True)
         try:
             await send({"type": "error", "message": f"Session error: {str(e)}"})
         except Exception:
             pass
+
     finally:
         stop_event.set()
         logger.info("Live agent session ended")
