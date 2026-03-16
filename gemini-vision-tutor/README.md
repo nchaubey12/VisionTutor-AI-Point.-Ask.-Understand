@@ -1,390 +1,404 @@
-# 🎓 Gemini Vision Tutor
+# 🎓 VisionTutor AI — Point. Ask. Understand.
 
-> **Real-Time Multimodal AI Tutor powered by Google Gemini**
-> Built for the Gemini Live Agent Challenge
+> **Real-time AI tutoring powered by webcam vision and natural voice. No typing. No uploading. Just point your camera and learn.**
 
-A real-time AI tutoring system that **sees your homework** through the camera, **understands the problem** using Gemini Vision, **explains step-by-step** with voice, and lets you **interrupt naturally** to ask questions — all in a live, bidirectional conversation.
+Built for the **Gemini Live Agent Challenge** — a multimodal live agent that turns any webcam into an intelligent homework tutor. Students point their camera at any problem, speak their question naturally, and receive spoken step-by-step explanations with generated visual aids — with full interruption support, just like a real tutor.
 
----
+## 🎥 Demo: [VisionTutor AI — Live Demo](https://youtu.be/your-demo-link)
 
-## ✨ Features
-
-| Feature | Description |
-|---|---|
-| 📷 **Live Vision Analysis** | Points camera at homework → Gemini identifies subject, problem, errors |
-| 🗣️ **Interruptible Voice Tutor** | Hold-to-speak mic button; interrupt mid-explanation naturally |
-| 🧠 **Multi-Agent Pipeline** | Vision → Reasoning → Teaching → Dialogue agents work in sequence |
-| 🎨 **AI-Generated Diagrams** | SVG diagrams generated on-demand for visual learners |
-| 📝 **Practice Questions** | Auto-generates similar practice problems with hints & answers |
-| 💾 **Conversation Memory** | Firestore persists session history for coherent multi-turn teaching |
-| ⚡ **Streaming Responses** | Text streams token-by-token for responsive feel |
-| 🔊 **Text-to-Speech** | Browser TTS reads explanations aloud; mutable |
+[![Live Agents Category](https://img.shields.io/badge/Category-Live%20Agents%20🗣️-4285F4?style=flat&logo=google)](https://github.com/nchaubey12/VisionTutor-AI-Point.-Ask.-Understand)
+[![Gemini 2.5 Flash](https://img.shields.io/badge/Gemini-2.5%20Flash-4285F4?style=flat&logo=google)](https://ai.google.dev/)
+[![Gemini Live](https://img.shields.io/badge/Gemini-Live%20API-34A853?style=flat&logo=google)](https://ai.google.dev/)
+[![Google Cloud](https://img.shields.io/badge/Google-Cloud%20Run-FF6F00?style=flat&logo=googlecloud)](https://cloud.google.com/)
+[![Firebase](https://img.shields.io/badge/Firebase-Firestore-FFCA28?style=flat&logo=firebase)](https://firebase.google.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Python-009688?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-TypeScript-000000?style=flat&logo=nextdotjs)](https://nextjs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat)](LICENSE)
 
 ---
 
-## 🏗️ Architecture
+## 📸 Screenshots
 
-```
-┌─────────────┐   WebSocket   ┌──────────────────────────┐   REST/Stream   ┌─────────────────┐
-│  User Device│ ◄────────────► │  FastAPI Backend          │ ◄─────────────► │  Google Gemini  │
-│  (Browser)  │               │                           │                 │                 │
-│  - Camera   │               │  Agent Pipeline:           │                 │  - 1.5 Pro      │
-│  - Mic      │               │  1. VisionAgent            │                 │    (vision)     │
-│  - Speaker  │               │  2. ReasoningAgent         │                 │  - 1.5 Flash    │
-│             │               │  3. TeachingAgent          │                 │    (dialogue)   │
-│  Next.js    │               │  4. DialogueAgent          │                 └─────────────────┘
-│  + WebRTC   │               │                           │
-└─────────────┘               │  Services:                 │   ┌──────────────────────────────┐
-                               │  - GeminiService          │   │  Google Cloud                │
-                               │  - FirestoreService       ├──►│  - Cloud Run (hosting)       │
-                               │  - StorageService         │   │  - Firestore (sessions)      │
-                               └──────────────────────────┘   │  - Cloud Storage (files)     │
-                                                               │  - Secret Manager (keys)     │
-                                                               └──────────────────────────────┘
-```
+### Main Tutoring Interface — Ready to Tutor
+<img src="docs/screenshots/screenshot_02_tutor_frame_detection.png" width="900"/>
 
-See [`architecture-diagram.svg`](./architecture-diagram.svg) for the full visual diagram.
+### Gemini Analyzing Homework — Frame Detection
+<img src="docs/screenshots/screenshot_02_tutor_interface.png" width="900"/>
 
-### Agent Pipeline
+### Step-by-step Explanation with Visual Aid
+<img src="docs/screenshots/screenshot_03_explanation.png" width="900"/>
 
-```
-Camera Frame
-     │
-     ▼
-[VisionAgent]          ← Gemini 1.5 Pro Vision
-  Extracts: subject, problem, errors, difficulty
-     │
-     ▼
-[ReasoningAgent]       ← Gemini 1.5 Pro
-  Creates: step-by-step teaching plan
-     │
-     ▼
-[TeachingAgent]        ← Gemini 1.5 Pro
-  Generates: explanation text + SVG diagrams
-     │
-     ▼
-[DialogueAgent]        ← Gemini 1.5 Flash
-  Handles: interruptions, questions, conversation
-     │
-     ▼
-WebSocket → Browser (text chunks + diagrams + TTS)
-```
+### Live Agent Mode — Real-time Voice Interaction
+<img src="docs/screenshots/Screenshot_04_Live_Agent_Interaction.png" width="900"/>
+
+### Live Agent Dashboard — Ready to Speak
+<img src="docs/screenshots/Screenshot_04_live_agent_dashbord_to_speak.png" width="900"/>
+
+---
+
+## 🗺 System Diagrams
+
+### 1. Workflow Overview
+> End-to-end tutoring pipeline — from student pointing their webcam to receiving a step-by-step explanation with visual aid, using Gemini's multimodal capabilities.
+
+<img src="docs/diagrams/01_Workflow_Overview.png" width="700"/>
+
+---
+
+### 2. System Architecture
+> Full system architecture — Next.js frontend streams webcam frames to a FastAPI backend on Cloud Run, which orchestrates multiple AI agents backed by Gemini and returns explanations in real-time.
+
+<img src="docs/diagrams/02_System_Architecture.png" width="800"/>
+
+---
+
+### 3. LLM Orchestration & Multimodal Fusion
+> How audio and video streams are fused — vision_agent reads the homework frame, teaching_agent generates the explanation, dialogue_agent manages the conversation turn, and reasoning_agent produces the step-by-step breakdown.
+
+<img src="docs/diagrams/03_LLM_Orchestration.png" width="800"/>
+
+---
+
+### 4. Deployment Pipeline
+> From source code to Google Cloud — Terraform provisions Cloud Run, the deploy script builds and pushes the Docker image, and docker-compose enables local multi-service development.
+
+<img src="docs/diagrams/04_Deployment_Pipeline.png" width="700"/>
+
+---
+
+### 5. Firebase Data Flow
+> How Firestore stores session data and how the backend services interact with Firebase during a tutoring session.
+
+<img src="docs/diagrams/05_Firebase_Flow.png" width="700"/>
+
+---
+
+## 🧠 The Problem
+
+Every night, millions of students sit alone with homework they don't understand. Existing AI tools require typing — slow, frustrating, and completely disconnected from how students actually work.
+
+- You **can't type** a complex geometry diagram
+- You **can't describe** a messy handwritten equation fast enough
+- You **can't interrupt** a chatbot mid-sentence to ask a follow-up
+- Traditional tutors are **expensive** and unavailable at 11 PM
+
+There is no tool that lets a student simply *point at their problem and talk.*
+
+---
+
+## 💡 The Solution
+
+**No typing. No uploading. No waiting.**
+
+VisionTutor AI turns any webcam into a real-time homework tutor. Point your camera at any problem — handwritten equations, diagrams, printed text — click **Analyze Homework** and the AI instantly reads it, identifies the subject, and walks you through a full step-by-step explanation with generated visual aids.
+
+Switch to **Live Mode** for true conversational tutoring powered by Gemini Live API — speak naturally, interrupt freely, and get spoken responses in real-time while Gemini watches your homework through your camera.
+
+- 📸 **Point** — camera detects your homework instantly (math, science, English and more)
+- 🧠 **Analyze** — Gemini 2.5 Flash reads the problem, detects subject and difficulty level
+- 📋 **Understand** — step-by-step explanation with generated visual diagrams on the right panel
+- ❓ **Practice** — "Check Your Understanding" follow-up question after every explanation
+- 🎙️ **Go Live** — switch to Gemini Live for real-time voice tutoring with full barge-in support
+
+---
+
+## ✅ Hackathon Checklist
+
+- [x] Multimodal input — live webcam vision + microphone audio
+- [x] Gemini 2.5 Flash — homework frame analysis and step-by-step explanation
+- [x] Gemini Live API — real-time bidirectional voice mode with barge-in support
+- [x] Multi-agent pipeline — vision, dialogue, reasoning, and teaching agents
+- [x] Google GenAI SDK — Python backend orchestration
+- [x] Visual Aid generation — diagrams generated alongside explanations
+- [x] "Check Your Understanding" — follow-up questions after each explanation
+- [x] Subject detection — auto-detects math, science, grammar and more
+- [x] Next Step / Diagram / Practice controls in the UI
+- [x] Google Cloud hosting — FastAPI backend deployed on Cloud Run
+- [x] Firebase Firestore — session storage
+- [x] Next.js + TypeScript frontend — webcam and audio capture in browser
+- [x] Docker containerised backend + docker-compose for local dev
+- [x] Automated deployment — Terraform IaC + cloud_run_deploy.sh (bonus)
+- [x] Multi-subject support — math, science, English, and more
 
 ---
 
 ## 📁 Project Structure
 
 ```
-gemini-vision-tutor/
-├── frontend/
-│   ├── pages/
-│   │   ├── index.tsx          # Main tutor UI
-│   │   └── _app.tsx
-│   ├── hooks/
-│   │   ├── useWebSocket.ts    # WS connection + message routing
-│   │   ├── useWebcam.ts       # Camera access + frame capture
-│   │   └── useSpeech.ts       # Speech recognition + TTS
-│   ├── styles/globals.css
-│   ├── Dockerfile
-│   ├── next.config.js
-│   └── package.json
+VisionTutor-AI-Point.-Ask.-Understand/
+├── gemini-vision-tutor/
+│   │
+│   ├── backend/
+│   │   ├── agents/
+│   │   │   ├── __init__.py
+│   │   │   ├── dialogue_agent.py        ← Manages conversation turns
+│   │   │   ├── reasoning_agent.py       ← Step-by-step reasoning logic
+│   │   │   ├── teaching_agent.py        ← Tutoring response generation
+│   │   │   └── vision_agent.py          ← Webcam frame analysis
+│   │   ├── api/
+│   │   │   ├── __init__.py
+│   │   │   ├── live_agent.py            ← Gemini Live API session handler
+│   │   │   ├── tutor_routes.py          ← FastAPI REST route definitions
+│   │   │   └── websocket.py             ← WebSocket endpoint + stream manager
+│   │   ├── services/
+│   │   │   ├── __init__.py
+│   │   │   ├── firestore_service.py     ← Firestore read/write helpers
+│   │   │   ├── gemini_service.py        ← Gemini SDK wrapper
+│   │   │   └── storage_service.py       ← File/media storage helpers
+│   │   ├── tests/
+│   │   │   └── test_gemini_service.py   ← Unit tests
+│   │   ├── .env                         ← Local environment variables
+│   │   ├── .env.example                 ← Environment variable template
+│   │   ├── Dockerfile                   ← Container image for Cloud Run
+│   │   └── main.py                      ← FastAPI app entry point
+│   │
+│   ├── frontend/
+│   │   ├── hooks/
+│   │   │   ├── useLiveAgent.ts          ← Gemini Live session hook
+│   │   │   ├── useSpeech.ts             ← Speech input/output hook
+│   │   │   ├── useWebcam.ts             ← Webcam capture hook
+│   │   │   └── useWebSocket.ts          ← WebSocket connection hook
+│   │   ├── pages/
+│   │   │   ├── _app.tsx                 ← Next.js app wrapper
+│   │   │   └── index.tsx                ← Main tutoring interface (single page)
+│   │   ├── public/
+│   │   │   └── audio-processor.js       ← AudioWorklet PCM processor
+│   │   ├── styles/
+│   │   │   └── globals.css              ← Global styles
+│   │   ├── .env.local                   ← Frontend environment variables
+│   │   ├── Dockerfile                   ← Frontend container
+│   │   ├── next-env.d.ts
+│   │   ├── next.config.js
+│   │   ├── package.json
+│   │   ├── postcss.config.js
+│   │   ├── tailwind.config.js
+│   │   └── tsconfig.json
+│   │
+│   └── infrastructure/
+│       ├── terraform/
+│       │   └── main.tf                  ← Cloud Run, IAM, Artifact Registry
+│       └── cloud_run_deploy.sh          ← One-command Cloud Run deploy script
 │
-├── backend/
-│   ├── main.py                # FastAPI entry point
-│   ├── agents/
-│   │   ├── vision_agent.py    # Frame analysis
-│   │   ├── reasoning_agent.py # Problem solving + teaching plans
-│   │   ├── teaching_agent.py  # Explanation + diagram generation
-│   │   └── dialogue_agent.py  # Conversation + interruptions
-│   ├── services/
-│   │   ├── gemini_service.py  # Gemini API integration
-│   │   ├── firestore_service.py
-│   │   └── storage_service.py
-│   ├── api/
-│   │   ├── websocket.py       # /ws/tutor endpoint
-│   │   └── tutor_routes.py    # REST endpoints
-│   ├── Dockerfile
-│   └── requirements.txt
-│
-├── infrastructure/
-│   ├── cloud_run_deploy.sh    # One-command GCP deployment
-│   └── terraform/
-│       ├── main.tf            # All GCP resources
-│       └── terraform.tfvars.example
-│
-├── docker-compose.yml         # Local dev stack
+├── .env
 ├── .env.example
-├── architecture-diagram.svg
+├── .gitignore
+├── architecture-diagram.png             ← System architecture diagram
+├── docker-compose.yml                   ← Local multi-service dev setup
+├── LICENSE
 └── README.md
 ```
 
 ---
 
-## 🚀 Quick Start (Local)
+## 🚀 Quick Start
 
 ### Prerequisites
+- Python 3.11+
+- Node.js 18+ and npm
+- Docker
+- Google Cloud CLI (`gcloud`)
+- A Google Cloud project with Gemini API and Cloud Run enabled
 
-- **Node.js** 20+
-- **Python** 3.11+
-- **Docker** + **Docker Compose** (optional, recommended)
-- **Gemini API Key** — get one free at [aistudio.google.com](https://aistudio.google.com/app/apikey)
-
-### Option A — Docker Compose (Recommended)
+### 1. Clone the Repository
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/your-org/gemini-vision-tutor
-cd gemini-vision-tutor
-
-# 2. Configure environment
-cp .env.example .env
-# Edit .env and set GEMINI_API_KEY=your_key_here
-
-# 3. Start everything
-docker-compose up --build
-
-# Open http://localhost:3000
+git clone https://github.com/nchaubey12/VisionTutor-AI-Point.-Ask.-Understand.git
+cd VisionTutor-AI-Point.-Ask.-Understand
 ```
 
-### Option B — Manual Setup
+### 2. Configure Keys
+
+Edit `gemini-vision-tutor/backend/.env` (copy from `.env.example`):
+
+```env
+GEMINI_API_KEY=your_gemini_api_key
+FIREBASE_PROJECT_ID=your_firebase_project_id
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk@your-project.iam.gserviceaccount.com
+PORT=8000
+ALLOWED_ORIGINS=http://localhost:3000
+```
+
+Edit `gemini-vision-tutor/frontend/.env.local` (copy from `.env.example`):
+
+```env
+NEXT_PUBLIC_BACKEND_WS_URL=ws://localhost:8000
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_firebase_project_id
+```
+
+### 3. Run with Docker Compose (Recommended)
+
+```bash
+docker-compose up --build
+# Frontend: http://localhost:3000
+# Backend:  http://localhost:8000
+```
+
+### 4. Run Manually
 
 **Backend:**
 ```bash
-cd backend
-
-# Create virtual environment
+cd gemini-vision-tutor/backend
 python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Set environment variable
-export GEMINI_API_KEY=your_api_key_here
-
-# Start the server
-uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 **Frontend:**
 ```bash
-cd frontend
-
-# Install dependencies
+cd gemini-vision-tutor/frontend
 npm install
-
-# Set WebSocket URL
-echo "NEXT_PUBLIC_WS_URL=ws://localhost:8080/ws/tutor" > .env.local
-
-# Start dev server
 npm run dev
-
-# Open http://localhost:3000
+# App: http://localhost:3000
 ```
 
----
-
-## ☁️ Google Cloud Deployment
-
-### Option A — Deployment Script (Recommended)
+### 5. Deploy to Google Cloud
 
 ```bash
-# 1. Authenticate with Google Cloud
+cd gemini-vision-tutor/infrastructure
+chmod +x cloud_run_deploy.sh
+./cloud_run_deploy.sh
+```
+
+Or manually:
+```bash
 gcloud auth login
-gcloud auth configure-docker
+gcloud config set project YOUR_PROJECT_ID
 
-# 2. Set your project
-export GOOGLE_CLOUD_PROJECT=your-project-id
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/visiontutor-backend ./gemini-vision-tutor/backend
 
-# 3. Store your API key in Secret Manager
-echo -n "your-gemini-api-key" | \
-  gcloud secrets create gemini-api-key --data-file=- \
-  --project=$GOOGLE_CLOUD_PROJECT
-
-# 4. Run the deployment script
-chmod +x infrastructure/cloud_run_deploy.sh
-bash infrastructure/cloud_run_deploy.sh
-```
-
-### Option B — Terraform
-
-```bash
-cd infrastructure/terraform
-
-# Copy and configure variables
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your project_id, region, gemini_api_key
-
-# Initialize and apply
-terraform init
-terraform plan
-terraform apply
-
-# Deploy containers (after Terraform creates infrastructure)
-bash ../cloud_run_deploy.sh
-```
-
-### Manual Docker Build + Deploy
-
-```bash
-# Backend
-docker build --platform linux/amd64 -t gcr.io/YOUR_PROJECT/tutor-backend ./backend
-docker push gcr.io/YOUR_PROJECT/tutor-backend
-gcloud run deploy tutor-backend \
-  --image gcr.io/YOUR_PROJECT/tutor-backend \
-  --platform managed --region us-central1 \
+gcloud run deploy visiontutor-backend \
+  --image gcr.io/YOUR_PROJECT_ID/visiontutor-backend \
+  --platform managed \
+  --region us-central1 \
   --allow-unauthenticated \
-  --set-secrets GEMINI_API_KEY=gemini-api-key:latest \
-  --set-env-vars GOOGLE_CLOUD_PROJECT=YOUR_PROJECT
-
-# Frontend
-BACKEND_WS_URL=wss://your-backend-url/ws/tutor
-docker build --platform linux/amd64 \
-  --build-arg NEXT_PUBLIC_WS_URL=$BACKEND_WS_URL \
-  -t gcr.io/YOUR_PROJECT/tutor-frontend ./frontend
-docker push gcr.io/YOUR_PROJECT/tutor-frontend
-gcloud run deploy tutor-frontend \
-  --image gcr.io/YOUR_PROJECT/tutor-frontend \
-  --platform managed --region us-central1 \
-  --allow-unauthenticated
+  --set-env-vars GEMINI_API_KEY=your_key,FIREBASE_PROJECT_ID=your_project
 ```
 
 ---
 
-## 🎬 Demo Instructions (4-minute walkthrough)
+## 📡 API Reference
 
-1. **Open the app** — browser requests camera + mic permissions, click Allow
-2. **Show homework** — hold a math problem, science question, or any homework in front of the camera
-3. **Click "Analyze Homework"** — Gemini Vision identifies the subject and problem (shown in left panel)
-4. **Watch the explanation stream** — step-by-step explanation appears in real-time
-5. **Interrupt with voice** — hold the microphone button and ask "Wait, why did you do that?"
-6. **Request a diagram** — click "Diagram" to generate a visual aid for the concept
-7. **Get practice** — click "Practice" to receive a similar question to test understanding
-8. **Continue** — click "Next Step" to proceed through the teaching plan
+### WebSocket — `/ws/tutor` — Tutoring Session
 
----
-
-## 📡 WebSocket API Reference
-
-### Client → Server
-
-```jsonc
-// Send a camera frame for analysis
-{ "type": "frame", "image": "<base64-jpeg>", "force_reanalyze": false }
-
-// Send voice/text input (supports interruptions)
-{ "type": "voice_input", "text": "Why did you divide by 2?" }
-
-// Request a visual diagram
-{ "type": "request_diagram", "concept": "quadratic formula" }
-
-// Request a practice question
-{ "type": "request_practice" }
-
-// Advance to next step
-{ "type": "next_step" }
-
-// Reset session
-{ "type": "new_session" }
+**Video frame message** (JSON):
+```json
+{
+  "type": "video_frame",
+  "data": "<base64 JPEG>",
+  "mime_type": "image/jpeg"
+}
 ```
 
-### Server → Client
+**Audio message** (binary frame):
+```
+PCM 16-bit, 16kHz mono — raw audio chunk bytes
+```
 
-```jsonc
-// Connection confirmed
-{ "type": "connected", "session_id": "uuid", "message": "..." }
-
-// Frame analyzed — problem detected
-{ "type": "frame_analyzed", "subject": "math", "problem": "...", "difficulty": "high", "total_steps": 3 }
-
-// Explanation step starting
-{ "type": "explanation_start", "step": 0, "step_title": "Understanding the Problem", "total_steps": 3 }
-
-// Streaming text chunk
-{ "type": "text_chunk", "text": "First, let's identify..." }
-
-// Explanation finished
-{ "type": "explanation_complete", "full_text": "...", "step": 0, "follow_up": "Does that make sense?" }
-
-// SVG diagram generated
-{ "type": "diagram", "svg": "<svg>...</svg>", "concept": "..." }
-
-// Practice question
-{ "type": "practice_question", "question": "...", "hint": "...", "answer": "..." }
-
-// Interruption acknowledged
-{ "type": "interrupted" }
+**Interrupt message** (JSON):
+```json
+{ "type": "interrupt" }
 ```
 
 ---
 
-## ⚙️ Environment Variables
+### REST Endpoints
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GEMINI_API_KEY` | ✅ | — | Google Gemini API key |
-| `GOOGLE_CLOUD_PROJECT` | Optional | — | GCP project ID (enables Firestore/GCS) |
-| `FIRESTORE_COLLECTION` | Optional | `tutor_sessions` | Firestore collection name |
-| `GCS_BUCKET_NAME` | Optional | — | Cloud Storage bucket |
-| `PORT` | Optional | `8080` | Backend server port |
-| `ENV` | Optional | `production` | `development` enables hot reload |
-| `NEXT_PUBLIC_WS_URL` | ✅ Frontend | — | WebSocket URL for frontend |
+```
+GET    /health                         ← health check
+POST   /api/analyze                    ← analyze a captured homework frame
+GET    /api/sessions                   ← list past sessions
+GET    /api/sessions/{session_id}      ← full session transcript
+```
 
 ---
 
-## 🛠️ Technology Stack
+## 📤 Example Tutor Response (Firestore)
 
-**Frontend**
-- Next.js 14 (Pages Router)
-- TypeScript
-- TailwindCSS
-- WebRTC (camera/mic access)
-- Web Speech API (STT + TTS)
-- Native WebSocket
-
-**Backend**
-- Python 3.11
-- FastAPI + Uvicorn
-- google-generativeai SDK
-- WebSockets (via FastAPI)
-- Pydantic v2
-
-**AI / ML**
-- Gemini 1.5 Pro (vision, reasoning, diagram generation)
-- Gemini 1.5 Flash (fast dialogue, interruptions)
-- Streaming via AsyncIterator
-
-**Google Cloud**
-- Cloud Run (serverless containers)
-- Firestore (conversation storage)
-- Cloud Storage (media files)
-- Secret Manager (API keys)
-- Vertex AI / Google AI Studio
-
-**Infrastructure**
-- Docker + Docker Compose
-- Terraform
-- gcloud CLI scripts
+```json
+{
+  "session_id": "sess_A3F19C",
+  "subject_detected": "math",
+  "difficulty": "middle",
+  "problem": "2x + 6 = 14",
+  "steps": [
+    {
+      "step": 1,
+      "title": "Isolate the variable term",
+      "explanation": "Subtract 6 from both sides: 2x + 6 - 6 = 14 - 6 → 2x = 8",
+      "visual_aid": true
+    },
+    {
+      "step": 2,
+      "title": "Solve for x",
+      "explanation": "Divide both sides by 2: 2x ÷ 2 = 8 ÷ 2 → x = 4",
+      "visual_aid": true
+    }
+  ],
+  "check_your_understanding": "How would you solve 2x - 6 = 14?",
+  "answer": "x = 4"
+}
+```
 
 ---
 
-## 🏆 Hackathon Compliance
+## ☁️ Google Cloud Services Used
 
-| Requirement | Implementation |
+| Service | Usage |
 |---|---|
-| ✅ Gemini model usage | Gemini 1.5 Pro + Flash via google-generativeai SDK |
-| ✅ Gemini Live API | Real-time streaming via AsyncIterator WebSocket pipeline |
-| ✅ Google Cloud hosting | Cloud Run (both frontend + backend) |
-| ✅ Multimodal input | Camera frames (vision) + voice input (speech) + text |
-| ✅ Multimodal output | Text + TTS voice + SVG diagrams |
-| ✅ Agent architecture | 4 specialized agents (Vision, Reasoning, Teaching, Dialogue) |
+| **Gemini 2.5 Flash** | Homework frame analysis, step-by-step explanation, visual aid generation |
+| **Gemini Live API** | Real-time bidirectional voice mode — barge-in, interrupt, natural conversation |
+| **Google GenAI SDK** | Python backend orchestration across all agents |
+| **Cloud Run** | Serverless container hosting for the FastAPI backend |
+| **Firebase Firestore** | Session storage, transcripts, subject detection results |
+| **Google Artifact Registry** | Docker image storage for Cloud Run deployments |
+| **Terraform IaC** | Cloud Run, IAM, and registry provisioning |
 
 ---
 
-## 📄 License
+## 🏗️ How It Works — Agent Pipeline
 
-MIT License — see [LICENSE](./LICENSE) for details.
+```
+Student points webcam at homework
+              │
+              ▼
+useWebcam.ts captures JPEG frame
+              │
+              ▼
+vision_agent.py  ──── Reads the frame, detects subject + problem
+              │
+              ▼
+teaching_agent.py ─── Generates step-by-step explanation
+reasoning_agent.py ── Structures the logical steps
+dialogue_agent.py ─── Manages the conversation turn
+              │
+              ▼
+Response returned to frontend:
+  ├── Step title + explanation text displayed
+  ├── Visual Aid diagram generated (right panel)
+  ├── "Check Your Understanding" follow-up question
+  └── Next Step / Diagram / Practice controls enabled
+
+─────── OR switch to LIVE MODE ───────
+
+useLiveAgent.ts opens Gemini Live session
+  ├── Unmute mic → speak naturally
+  ├── Enable camera → Gemini sees your homework
+  ├── Interrupt at any time (barge-in)
+  └── Real-time voice response streamed back
+```
 
 ---
 
-*Built with creativity, intelligent agents, and real-time AI for the Gemini Live Agent Challenge.*
+## 🔑 Keywords
+
+`Gemini 2.5 Flash` · `Gemini Live API` · `Real-time AI tutoring` · `Multimodal AI` · `Multi-agent pipeline` · `WebSockets` · `FastAPI` · `Next.js` · `Firebase Firestore` · `Google Cloud Run` · `Vision AI` · `EdTech` · `Live Agents` · `Barge-in support` · `Terraform IaC` · `Responsible AI` · `Smart education`
+
+---
+
+## 👥 Team
+
+Built with curiosity, caffeine, and a belief that every student deserves a patient tutor — for the **Gemini Live Agent Challenge**.
+
+> *The most powerful thing about VisionTutor is not just the speed — it's that Gemini sees exactly what the student sees. When a student points at "this part" of a handwritten equation, Gemini knows exactly what they mean, generates a step-by-step explanation referencing that specific problem, and draws a visual aid — all without the student typing a single word.*
