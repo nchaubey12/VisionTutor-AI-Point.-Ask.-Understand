@@ -277,6 +277,92 @@ gcloud run deploy visiontutor-backend \
 ```
 
 ---
+## 🧪 Reproducible Testing
+
+Once the app is running at `http://localhost:3000`, follow these steps to verify every feature works correctly.
+
+---
+
+### ✅ 1. Health Check (Backend)
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+```json
+{ "status": "ok" }
+```
+
+---
+
+### ✅ 2. Test Standard Mode (Vision + Explanation)
+
+1. Open `http://localhost:3000` in Chrome or Firefox
+2. Allow **webcam** and **microphone** permissions when prompted
+3. Point your camera at any homework problem (handwritten equation, printed text, or diagram)
+4. Click **"Analyze Homework"**
+
+Expected results:
+- Subject is detected (e.g. `math`, `science`, `grammar`)
+- Step-by-step explanation appears in the left panel
+- SVG visual aid diagram renders in the right panel
+- "Check Your Understanding" follow-up question appears below the explanation
+
+---
+
+### ✅ 3. Test Follow-up Voice Question (Standard Mode)
+
+1. After an explanation loads, unmute your microphone
+2. Ask a follow-up question verbally (e.g. *"Can you explain step 2 again?"*)
+
+Expected: Gemini responds with a spoken clarification without re-analyzing the frame.
+
+---
+
+### ✅ 4. Test Live Mode (Gemini Live API)
+
+1. Click the **"Go Live"** button
+2. Enable your camera and unmute your microphone
+3. Speak naturally — e.g. *"Can you explain this equation to me?"*
+
+Expected results:
+- Gemini responds in voice within **~1 second**
+- Status indicator shows `listening` → `speaking` transitions
+- **Barge-in:** interrupt Gemini mid-sentence with a new question — it stops and responds to the new question immediately
+
+---
+
+### ✅ 5. Run Backend Unit Tests
+```bash
+cd gemini-vision-tutor/backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pytest tests/ -v
+```
+
+Expected: all tests in `test_gemini_service.py` pass.
+
+---
+
+### ✅ 6. Test Without Firebase (Offline Fallback)
+
+Run the backend without any Firebase credentials in `.env`. The app should still start and all tutoring features should work using the **in-memory fallback** — no crash, no hang.
+
+---
+
+### 🔍 Quick Feature Verification Table
+
+| Feature | How to test | Expected result |
+|---|---|---|
+| Webcam frame analysis | Point camera → Analyze | Subject + problem detected |
+| Step-by-step explanation | Click Analyze | Steps appear with titles |
+| SVG visual aid | Click Analyze | Diagram renders in right panel |
+| Practice question | Complete an explanation | "Check Your Understanding" appears |
+| Live voice mode | Go Live → speak | Voice response in <1s |
+| Barge-in / interrupt | Speak while Gemini talks | Gemini stops, responds to new question |
+| Health endpoint | `curl /health` | `{"status": "ok"}` |
+| Firebase fallback | Remove Firebase env vars | App still runs fully |
 
 ## 📡 API Reference
 
@@ -300,7 +386,6 @@ PCM 16-bit, 16kHz mono — raw audio chunk bytes
 ```json
 { "type": "interrupt" }
 ```
-
 ---
 
 ### REST Endpoints
