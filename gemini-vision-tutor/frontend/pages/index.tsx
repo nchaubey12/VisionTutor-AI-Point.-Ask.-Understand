@@ -29,6 +29,7 @@ export default function TutorPage() {
   const [showPractice, setShowPractice]         = useState(false);
   const [showAnswer, setShowAnswer]             = useState(false);
   const [isAnalyzing, setIsAnalyzing]           = useState(false);
+  const [keepCameraOn, setKeepCameraOn]         = useState(false);
   const [isExplaining, setIsExplaining]         = useState(false);
   const [isGenerating, setIsGenerating]         = useState(false);
   const [liveTranscript, setLiveTranscript]     = useState("");
@@ -36,8 +37,7 @@ export default function TutorPage() {
   const [cameraFrameColor, setCameraFrameColor] = useState<"default"|"green"|"red">("default");
   const explanationRef = useRef<HTMLDivElement>(null);
 
-  const { videoRef, canvasRef, isActive, error: cameraError, startCamera, captureFrame } = useWebcam();
-  useEffect(() => { startCamera(); }, [startCamera]);
+  const { videoRef, canvasRef, isActive, error: cameraError, startCamera, stopCamera, captureFrame } = useWebcam();
 
   const { isListening, isSpeaking, isSupported: speechSupported, startListening, stopListening, speak, stopSpeaking } = useSpeech({
     onTranscript: (text) => { setStatusMsg(`You said: "${text}"`); sendVoiceInput(text); },
@@ -129,6 +129,7 @@ export default function TutorPage() {
     onTranscript: (text) => setLiveTranscript(prev => prev + text + " "),
     onInterrupted: handleInterrupted,
     onTurnComplete: handleTurnComplete,
+    onStatus: (msg) => setStatusMsg(msg),
   });
 
   // Gemini Live is full-duplex — it handles its own echo cancellation.
@@ -153,7 +154,8 @@ export default function TutorPage() {
     if (!frame) return;
     setIsAnalyzing(true);
     sendFrame(frame, true);
-  }, [isActive, isConnected, captureFrame, sendFrame]);
+    if (!keepCameraOn) stopCamera();
+  }, [isActive, isConnected, captureFrame, sendFrame, keepCameraOn, stopCamera]);
 
   useEffect(() => {
     if (explanationRef.current) explanationRef.current.scrollTop = explanationRef.current.scrollHeight;
@@ -227,7 +229,7 @@ export default function TutorPage() {
             {!isActive && (
               <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.85)", gap: 8 }}>
                 <CameraOff size={24} color="rgba(255,255,255,0.2)" />
-                <button onClick={startCamera} style={{ padding: "6px 16px", background: "#6366f1", border: "none", borderRadius: 8, color: "#fff", fontSize: 12, cursor: "pointer" }}>Enable Camera</button>
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>Camera off</span>
               </div>
             )}
 
@@ -263,10 +265,23 @@ export default function TutorPage() {
 
           {/* Action buttons */}
           {mode === "standard" ? (
-            <button onClick={handleAnalyze} disabled={isAnalyzing || !isActive || !isConnected}
-              style={{ width: "100%", padding: "11px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 13, cursor: isAnalyzing || !isActive || !isConnected ? "not-allowed" : "pointer", opacity: isAnalyzing || !isActive || !isConnected ? 0.5 : 1, background: isAnalyzing ? "rgba(99,102,241,0.3)" : "linear-gradient(135deg, #6366f1, #3b82f6)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, transition: "all 0.2s", letterSpacing: "-0.01em" }}>
-              {isAnalyzing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Analyzing...</> : <><Zap size={14} /> Analyze Homework</>}
-            </button>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={isActive ? stopCamera : startCamera}
+                  style={{ flex: "0 0 auto", padding: "11px 14px", borderRadius: 12, border: isActive ? "1px solid rgba(59,130,246,0.4)" : "1px solid rgba(255,255,255,0.08)", background: isActive ? "rgba(59,130,246,0.12)" : "rgba(255,255,255,0.04)", color: isActive ? "#60a5fa" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                  {isActive ? <><Camera size={13} /> On</> : <><CameraOff size={13} /> Off</>}
+                </button>
+                <button onClick={handleAnalyze} disabled={isAnalyzing || !isActive || !isConnected}
+                  style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 13, cursor: isAnalyzing || !isActive || !isConnected ? "not-allowed" : "pointer", opacity: isAnalyzing || !isActive || !isConnected ? 0.5 : 1, background: isAnalyzing ? "rgba(99,102,241,0.3)" : "linear-gradient(135deg, #6366f1, #3b82f6)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, transition: "all 0.2s" }}>
+                  {isAnalyzing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Analyzing...</> : <><Zap size={14} /> Analyze Homework</>}
+                </button>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "0 2px" }}>
+                <input type="checkbox" checked={keepCameraOn} onChange={e => setKeepCameraOn(e.target.checked)}
+                  style={{ width: 14, height: 14, accentColor: "#6366f1", cursor: "pointer" }} />
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>Keep camera on after capture</span>
+              </label>
+            </div>
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
               <button
@@ -277,7 +292,10 @@ export default function TutorPage() {
                   ? <><Mic size={13} style={{ animation: "pulse 1.5s infinite" }} /> Mute</>
                   : <><MicOff size={13} /> Unmute</>}
               </button>
-              <button onClick={isCameraOn ? liveStopCamera : liveStartCamera} disabled={!liveConnected}
+              <button onClick={() => {
+                  if (isCameraOn) { liveStopCamera(); stopCamera(); }
+                  else { startCamera(); liveStartCamera(); }
+                }} disabled={!liveConnected}
                 style={{ flex: 1, padding: "10px 0", borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: "pointer", border: isCameraOn ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)", background: isCameraOn ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.05)", color: isCameraOn ? "#60a5fa" : "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: !liveConnected ? 0.4 : 1 }}>
                 {isCameraOn ? <><Camera size={13} /> Camera On</> : <><CameraOff size={13} /> Camera Off</>}
               </button>

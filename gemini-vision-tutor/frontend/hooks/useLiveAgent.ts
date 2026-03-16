@@ -1,34 +1,28 @@
 /**
  * useLiveAgent - Gemini Live API real-time audio+vision hook
- * Uses AudioWorkletNode for glitch-free mic capture and sends audio
- * immediately on every chunk — no timer batching that causes gaps.
- *
- * Fixes vs previous version:
- *  1. playNextChunk always resumes the AudioContext before scheduling —
- *     browsers suspend it after first playback, silently breaking all
- *     subsequent audio.
- *  2. Gapless playback — chunks are scheduled back-to-back using
- *     ctx.currentTime + offset instead of waiting for onended, so
- *     there are no gaps between Gemini's audio chunks.
- *  3. stopAudio no longer closes/recreates the AudioContext (that was
- *     the source of the suspended-context bug). It just stops all
- *     in-flight sources and resets the playhead.
+ * Fixed: correct model (gemini-2.5-flash-native-audio-latest),
+ *        stopAudio signal on mute, input/output transcription support
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface LiveMessage {
-  type: "connected" | "audio" | "text" | "interrupted" | "turn_complete" | "error" | "reconnected" | "gate_reset";
+  type: "connected" | "audio" | "text" | "interrupted" | "turn_complete"
+      | "error" | "reconnected" | "gate_reset" | "status"
+      | "input_transcription" | "output_transcription";
   data?: string;
   text?: string;
   message?: string;
 }
 
 interface UseLiveAgentOptions {
-  onMessage?: (msg: LiveMessage) => void;
-  onTranscript?: (text: string) => void;
-  onInterrupted?: () => void;
-  onTurnComplete?: () => void;
+  onMessage?:           (msg: LiveMessage) => void;
+  onTranscript?:        (text: string) => void;
+  onInputTranscript?:   (text: string) => void;   // ✅ what user said
+  onOutputTranscript?:  (text: string) => void;   // ✅ what Gemini said
+  onInterrupted?:       () => void;
+  onTurnComplete?:      () => void;
+  onStatus?:            (msg: string) => void;
   videoRef: React.RefObject<HTMLVideoElement>;
 }
 
@@ -43,8 +37,11 @@ const FRAME_INTERVAL_MS = 4000;
 export function useLiveAgent({
   onMessage,
   onTranscript,
+  onInputTranscript,
+  onOutputTranscript,
   onInterrupted,
   onTurnComplete,
+  onStatus,
   videoRef,
 }: UseLiveAgentOptions) {
   const [isConnected, setIsConnected] = useState(false);
@@ -62,15 +59,13 @@ export function useLiveAgent({
   const frameTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const canvasRef      = useRef<HTMLCanvasElement | null>(null);
   const outCtxRef      = useRef<AudioContext | null>(null);
+  const isMutedRef     = useRef(false);   // ✅ track mute state for worklet
 
-  // ── Gapless playback state ───────────────────────────────────────────────
-  // nextPlayTimeRef tracks when the last scheduled chunk ends so we can
-  // schedule the next one immediately after with no gap, no overlap.
   const nextPlayTimeRef  = useRef<number>(0);
   const isSpeakingRef    = useRef<boolean>(false);
   const scheduledSources = useRef<AudioBufferSourceNode[]>([]);
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   const sendWs = useCallback((data: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -92,9 +87,6 @@ export function useLiveAgent({
     return buf.buffer;
   };
 
-  // ── Ensure AudioContext is always running ────────────────────────────────
-  // Browsers suspend the AudioContext after first playback ends.
-  // Without this, every second response from Gemini is completely silent.
   const ensureOutCtx = useCallback(async (): Promise<AudioContext | null> => {
     if (!outCtxRef.current || outCtxRef.current.state === "closed") {
       outCtxRef.current = new AudioContext({ sampleRate: OUT_SAMPLE_RATE });
@@ -105,16 +97,13 @@ export function useLiveAgent({
     return outCtxRef.current;
   }, []);
 
-  // ── Gapless audio enqueue ────────────────────────────────────────────────
-  // Each chunk is scheduled to start exactly when the previous chunk ends.
-  // This is the correct Web Audio API pattern for gapless streaming.
   const enqueueAudio = useCallback(async (b64: string) => {
     const ctx = await ensureOutCtx();
     if (!ctx) return;
 
-    const raw   = fromBase64(b64);
-    const int16 = new Int16Array(raw);
-    const f32   = new Float32Array(int16.length);
+    const raw    = fromBase64(b64);
+    const int16  = new Int16Array(raw);
+    const f32    = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768.0;
 
     const audioBuf = ctx.createBuffer(1, f32.length, OUT_SAMPLE_RATE);
@@ -124,8 +113,6 @@ export function useLiveAgent({
     src.buffer = audioBuf;
     src.connect(ctx.destination);
 
-    // Schedule back-to-back: start immediately if queue is empty,
-    // otherwise start exactly when the last chunk finishes
     const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current);
     src.start(startAt);
     nextPlayTimeRef.current = startAt + audioBuf.duration;
@@ -136,10 +123,8 @@ export function useLiveAgent({
     }
 
     scheduledSources.current.push(src);
-
     src.onended = () => {
       scheduledSources.current = scheduledSources.current.filter(s => s !== src);
-      // Only mark not-speaking when the very last scheduled chunk finishes
       if (scheduledSources.current.length === 0) {
         isSpeakingRef.current = false;
         setIsSpeaking(false);
@@ -147,14 +132,10 @@ export function useLiveAgent({
     };
   }, [ensureOutCtx]);
 
-  // ── Stop audio immediately (called on interrupt) ─────────────────────────
-  // Stops all scheduled sources. Does NOT close the AudioContext — closing
-  // it was the root cause of the "responds once then goes silent" bug,
-  // because the recreated context always starts in suspended state.
   const stopAudio = useCallback(() => {
     const now = outCtxRef.current?.currentTime ?? 0;
     for (const src of scheduledSources.current) {
-      try { src.stop(now); } catch (_) { /* already ended, ignore */ }
+      try { src.stop(now); } catch (_) {}
     }
     scheduledSources.current = [];
     nextPlayTimeRef.current  = 0;
@@ -162,7 +143,7 @@ export function useLiveAgent({
     setIsSpeaking(false);
   }, []);
 
-  // ── Mic ──────────────────────────────────────────────────────────────────
+  // ── Mic ───────────────────────────────────────────────────────────────────
 
   const startMic = useCallback(async () => {
     if (isMicOn) return;
@@ -173,11 +154,12 @@ export function useLiveAgent({
           sampleRate: MIC_SAMPLE_RATE,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: false, // AGC fights Gemini's VAD
+          autoGainControl: false,
         },
         video: false,
       });
       micStreamRef.current = stream;
+      isMutedRef.current = false;
 
       const inCtx = new AudioContext({ sampleRate: MIC_SAMPLE_RATE });
       audioCtxRef.current = inCtx;
@@ -187,6 +169,8 @@ export function useLiveAgent({
       const workletNode = new AudioWorkletNode(inCtx, "mic-processor");
 
       workletNode.port.onmessage = (e: MessageEvent<Int16Array>) => {
+        // ✅ Don't send audio when muted — prevents silent PCM flooding Gemini
+        if (isMutedRef.current) return;
         const int16 = e.data;
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           sendWs({ type: "audio", data: toBase64(int16.buffer as ArrayBuffer) });
@@ -195,20 +179,16 @@ export function useLiveAgent({
 
       const src = inCtx.createMediaStreamSource(stream);
       src.connect(workletNode);
-      workletNode.connect(inCtx.destination); // keeps AudioContext alive
+      workletNode.connect(inCtx.destination);
 
       sourceRef.current      = src;
       workletNodeRef.current = workletNode;
 
-
-
       setIsMicOn(true);
       setError(null);
-      console.log("[Live] Mic started (AudioWorklet)");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Microphone access denied";
       setError(msg);
-      console.error("Mic error:", err);
     }
   }, [isMicOn, sendWs]);
 
@@ -216,20 +196,30 @@ export function useLiveAgent({
     workletNodeRef.current?.port.close();
     workletNodeRef.current?.disconnect();
     workletNodeRef.current = null;
-
     sourceRef.current?.disconnect();
     sourceRef.current = null;
-
     micStreamRef.current?.getTracks().forEach(t => t.stop());
     micStreamRef.current = null;
-
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
-
     setIsMicOn(false);
   }, []);
 
-  // ── Camera ───────────────────────────────────────────────────────────────
+  // ✅ Mute — stops sending audio chunks AND signals Gemini to respond
+  const muteMic = useCallback(() => {
+    isMutedRef.current = true;
+    if (mediaStream) micStreamRef.current?.getAudioTracks().forEach(t => t.enabled = false);
+    // Tell Gemini the user finished speaking so it responds
+    sendWs({ type: "stopAudio" });
+  }, [sendWs]);
+
+  // ✅ Unmute — re-enables audio stream
+  const unmuteMic = useCallback(() => {
+    isMutedRef.current = false;
+    micStreamRef.current?.getAudioTracks().forEach(t => t.enabled = true);
+  }, []);
+
+  // ── Camera ────────────────────────────────────────────────────────────────
 
   const startCamera = useCallback(() => {
     if (isCameraOn || frameTimerRef.current) return;
@@ -256,15 +246,13 @@ export function useLiveAgent({
     setIsCameraOn(false);
   }, []);
 
-  // ── Connect / disconnect ─────────────────────────────────────────────────
+  // ── Connect / disconnect ──────────────────────────────────────────────────
 
   const connect = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     setIsStarting(true);
     setError(null);
 
-    // Pre-warm the output AudioContext on the user gesture so it's never
-    // suspended when the first audio chunk arrives from Gemini
     await ensureOutCtx();
 
     const ws = new WebSocket(WS_URL);
@@ -273,13 +261,13 @@ export function useLiveAgent({
     ws.onopen = () => {
       setIsConnected(true);
       setIsStarting(false);
-      console.log("[Live] Connected");
     };
 
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data) as LiveMessage;
         onMessage?.(msg);
+
         switch (msg.type) {
           case "audio":
             if (msg.data) enqueueAudio(msg.data);
@@ -287,20 +275,30 @@ export function useLiveAgent({
           case "text":
             if (msg.text) onTranscript?.(msg.text);
             break;
+          // ✅ Input transcription = what the user said
+          case "input_transcription":
+            if (msg.text) onInputTranscript?.(msg.text);
+            break;
+          // ✅ Output transcription = what Gemini said
+          case "output_transcription":
+            if (msg.text) {
+              onOutputTranscript?.(msg.text);
+              onTranscript?.(msg.text);  // also feed main transcript
+            }
+            break;
           case "interrupted":
             stopAudio();
             onInterrupted?.();
             break;
           case "turn_complete":
-            // Reset the playhead so the next response starts fresh.
-            // Don't call stopAudio() here — let the last chunks finish.
             nextPlayTimeRef.current = 0;
             onTurnComplete?.();
             break;
-          case "reconnected":
-            break;
           case "gate_reset":
             workletNodeRef.current?.port.postMessage({ type: "reset" });
+            break;
+          case "status":
+            if (msg.message) onStatus?.(msg.message as string);
             break;
           case "error":
             setError(msg.message || "Unknown error");
@@ -316,14 +314,14 @@ export function useLiveAgent({
       setIsMicOn(false);
       setIsCameraOn(false);
       setIsSpeaking(false);
-      console.log("[Live] Disconnected, code:", evt.code);
     };
 
     ws.onerror = () => {
       setError("Connection failed — is the backend running?");
       setIsStarting(false);
     };
-  }, [enqueueAudio, stopAudio, ensureOutCtx, onMessage, onTranscript, onInterrupted, onTurnComplete]);
+  }, [enqueueAudio, stopAudio, ensureOutCtx, onMessage, onTranscript,
+      onInputTranscript, onOutputTranscript, onInterrupted, onTurnComplete, onStatus]);
 
   const disconnect = useCallback(() => {
     stopMic();
@@ -355,6 +353,8 @@ export function useLiveAgent({
     disconnect,
     startMic,
     stopMic,
+    muteMic,    
+    unmuteMic, 
     startCamera,
     stopCamera,
     sendText,
