@@ -4,7 +4,7 @@
 
 Built for the **Gemini Live Agent Challenge** — a multimodal live agent that turns any webcam into an intelligent homework tutor. Students point their camera at any problem, speak their question naturally, and receive spoken step-by-step explanations with generated visual aids — with full interruption support, just like a real tutor.
 
-## 🎥 Demo: [VisionTutor AI — Live Demo](https://youtu.be/your-demo-link)
+## 🎥 Demo: [VisionTutor AI — Live Demo](https://youtu.be/jc_m82hKUJI)
 
 [![Live Agents Category](https://img.shields.io/badge/Category-Live%20Agents%20🗣️-4285F4?style=flat&logo=google)](https://github.com/nchaubey12/VisionTutor-AI-Point.-Ask.-Understand)
 [![Gemini 2.5 Flash](https://img.shields.io/badge/Gemini-2.5%20Flash-4285F4?style=flat&logo=google)](https://ai.google.dev/)
