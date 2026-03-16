@@ -55,14 +55,14 @@ Built for the **Gemini Live Agent Challenge** — a multimodal live agent that t
 ### 3. LLM Orchestration & Multimodal Fusion
 > How audio and video streams are fused — vision_agent reads the homework frame, teaching_agent generates the explanation, dialogue_agent manages the conversation turn, and reasoning_agent produces the step-by-step breakdown.
 
-<img src="gemini-vision-tutor/docs/documents/03_LLM_Orchestration.png" width="800"/>
+<img src="gemini-vision-tutor/docs/documents/LLM_Orchestration.png" width="800"/>
 
 ---
 
 ### 4. Deployment Pipeline
 > From source code to Google Cloud — Terraform provisions Cloud Run, the deploy script builds and pushes the Docker image, and docker-compose enables local multi-service development.
 
-<img src="gemini-vision-tutor/docs/documents/04_Deployment_Pipeline.png" width="700"/>
+<img src="gemini-vision-tutor/docs/documents/Deployment_Pipeline.png" width="700"/>
 
 ---
 
