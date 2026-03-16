@@ -50,7 +50,9 @@ class TeachingAgent:
             response["text"] = text_part.strip()
             if diagram_desc.strip():
                 try:
-                    svg = await self.gemini.generate_diagram_code(diagram_desc.strip())
+                    svg = await self.gemini.generate_diagram_code(
+                        diagram_desc.strip(), problem_info=problem_info
+                    )
                     response["diagram_svg"] = svg
                     url = await self.storage.upload_diagram(session_id, svg)
                     response["diagram_url"] = url
@@ -67,10 +69,12 @@ class TeachingAgent:
 
         return response
 
-    async def generate_diagram_for_concept(self, session_id: str, concept: str) -> Optional[str]:
-        """Generate a standalone diagram for a concept. Returns SVG string."""
+    async def generate_diagram_for_concept(
+        self, session_id: str, concept: str, problem_info: dict = None
+    ) -> Optional[str]:
+        """Generate a standalone diagram showing the solution. Returns SVG string."""
         try:
-            svg = await self.gemini.generate_diagram_code(concept)
+            svg = await self.gemini.generate_diagram_code(concept, problem_info=problem_info)
             await self.storage.upload_diagram(session_id, svg)
             return svg
         except Exception as e:

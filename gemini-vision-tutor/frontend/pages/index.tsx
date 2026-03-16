@@ -28,6 +28,7 @@ export default function TutorPage() {
   const [isMuted, setIsMuted]                   = useState(false);
   const [showPractice, setShowPractice]         = useState(false);
   const [showAnswer, setShowAnswer]             = useState(false);
+  const [showDiagramSolution, setShowDiagramSolution] = useState(false);
   const [isAnalyzing, setIsAnalyzing]           = useState(false);
   const [keepCameraOn, setKeepCameraOn]         = useState(false);
   const [isExplaining, setIsExplaining]         = useState(false);
@@ -35,7 +36,18 @@ export default function TutorPage() {
   const [liveTranscript, setLiveTranscript]     = useState("");
   const [statusMsg, setStatusMsg]               = useState("Point camera at homework, then click Analyze");
   const [cameraFrameColor, setCameraFrameColor] = useState<"default"|"green"|"red">("default");
-  const explanationRef = useRef<HTMLDivElement>(null);
+  const explanationRef    = useRef<HTMLDivElement>(null);
+  const wasInterruptedRef = useRef<boolean>(false);
+
+  // ── Mute: pause speech. Unmute: resume from where it paused. ─────────────
+  // Uses pause()/resume() so speech position is preserved — no restart.
+  useEffect(() => {
+    if (isMuted) {
+      window.speechSynthesis?.pause();
+    } else {
+      window.speechSynthesis?.resume();
+    }
+  }, [isMuted]);
 
   const { videoRef, canvasRef, isActive, error: cameraError, startCamera, stopCamera, captureFrame } = useWebcam();
 
@@ -54,6 +66,7 @@ export default function TutorPage() {
         setStatusMsg(`Detected: ${message.subject}`);
         break;
       case "explanation_start":
+        wasInterruptedRef.current = false;
         setIsExplaining(true); setCurrentStep(message.step as number);
         setStepTitle(message.step_title as string || `Step ${(message.step as number) + 1}`);
         setExplanation(""); break;
@@ -64,12 +77,13 @@ export default function TutorPage() {
         setExplanation(ft);
         if (message.follow_up) setFollowUpQuestion(message.follow_up as string);
         setStatusMsg("Explanation complete");
-        if (!isMuted && ft) speak(ft);
+        if (!isMuted && ft && !wasInterruptedRef.current) speak(ft);
+        wasInterruptedRef.current = false;
         break;
       }
-      case "diagram": setDiagram({ svg: message.svg as string, concept: message.concept as string }); setIsGenerating(false); break;
-      case "interrupted": stopSpeaking(); setIsExplaining(false); break;
-      case "response_start": setExplanation(""); setIsExplaining(true); setStepTitle("Answering..."); break;
+      case "diagram": setDiagram({ svg: message.svg as string, concept: message.concept as string }); setIsGenerating(false); setShowDiagramSolution(false); break;
+      case "interrupted": stopSpeaking(); setIsExplaining(false); wasInterruptedRef.current = true; break;
+      case "response_start": wasInterruptedRef.current = false; setExplanation(""); setIsExplaining(true); setStepTitle("Answering..."); break;
       case "generating_diagram": setIsGenerating(true); break;
       case "generating_practice": setIsGenerating(true); break;
       case "practice_question":
@@ -86,27 +100,17 @@ export default function TutorPage() {
     }
   }, [isMuted, speak, stopSpeaking]);
 
-  const { isConnected, sendFrame, sendVoiceInput, requestDiagram, requestPractice, requestNextStep, resetSession } = useWebSocket({
+  const { isConnected, sendFrame, sendVoiceInput, requestDiagram, requestPractice, requestNextStep, resetSession, sendInterrupt } = useWebSocket({
     onMessage: handleMessage,
     onConnect: () => setStatusMsg("Connected — ready to tutor"),
     onDisconnect: () => setStatusMsg("Reconnecting..."),
   });
 
   // ── Live agent callbacks ──────────────────────────────────────────────────
-  // These are defined before useLiveAgent so they can be passed in cleanly.
-
-  // FIX: When Gemini is interrupted, stop sending mic audio immediately so
-  // Gemini doesn't receive the tail of the interruption as a new question.
-  // We restart the mic 600ms later so it's ready for the follow-up.
   const handleInterrupted = useCallback(() => {
     setStatusMsg("Listening...");
   }, []);
 
-  // FIX: After Gemini finishes a turn, do a brief mic stop/start cycle.
-  // This flushes any stale audio buffered in the worklet and ensures the
-  // AudioWorklet onmessage closure is bound to the current WebSocket.
-  // Without this, subsequent questions are sent but Gemini ignores them
-  // because the stream context is stale from the previous turn.
   const handleTurnComplete = useCallback(() => {
     setStatusMsg("Listening...");
   }, []);
@@ -132,10 +136,6 @@ export default function TutorPage() {
     onStatus: (msg) => setStatusMsg(msg),
   });
 
-  // Gemini Live is full-duplex — it handles its own echo cancellation.
-  // Never pause the mic: pausing causes a VAD silence gap that makes
-  // Gemini clear its audio buffer and ask "what was your question?".
-  // Just update the status label based on who is speaking.
   useEffect(() => {
     if (mode !== "live" || !liveConnected) return;
     if (liveGeminiSpeaking) {
@@ -156,6 +156,21 @@ export default function TutorPage() {
     sendFrame(frame, true);
     if (!keepCameraOn) stopCamera();
   }, [isActive, isConnected, captureFrame, sendFrame, keepCameraOn, stopCamera]);
+
+  // ── Hold to Speak handlers ────────────────────────────────────────────────
+  const handleSpeakPress = useCallback(() => {
+    wasInterruptedRef.current = true;
+    stopSpeaking();
+    sendInterrupt();
+    setIsExplaining(false);
+    setStatusMsg("Listening...");
+    startListening();
+  }, [stopSpeaking, sendInterrupt, startListening]);
+
+  const handleSpeakRelease = useCallback(() => {
+    wasInterruptedRef.current = false;
+    stopListening();
+  }, [stopListening]);
 
   useEffect(() => {
     if (explanationRef.current) explanationRef.current.scrollTop = explanationRef.current.scrollHeight;
@@ -401,11 +416,26 @@ export default function TutorPage() {
                 </p>
                 {followUpQuestion && !isExplaining && (
                   <div style={{ marginTop: 20, padding: "14px 16px", borderRadius: 12, background: "rgba(139,92,246,0.08)", border: "1px solid rgba(139,92,246,0.2)" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
                       <Lightbulb size={12} color="#a78bfa" />
                       <span style={{ fontSize: 10, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.08em" }}>Check Your Understanding</span>
                     </div>
-                    <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", margin: 0, lineHeight: 1.6 }}>{followUpQuestion}</p>
+                    <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", margin: "0 0 12px", lineHeight: 1.6 }}>{followUpQuestion}</p>
+                    {/*<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {[
+                        //{ label: "✅ Yes, I get it!", response: `Yes, I understand. ${followUpQuestion}`, color: "#10b981", bg: "rgba(16,185,129,0.1)", border: "rgba(16,185,129,0.3)" },
+                        //{ label: "🤔 Not really", response: `I'm not sure I fully understand. Can you explain it differently? The question was: ${followUpQuestion}`, color: "#f59e0b", bg: "rgba(245,158,11,0.1)", border: "rgba(245,158,11,0.3)" },
+                        //{ label: "💡 Show example", response: `Can you give me a real-world example specifically about: ${followUpQuestion}`, color: "#a78bfa", bg: "rgba(139,92,246,0.1)", border: "rgba(139,92,246,0.3)" },
+                      ].map(({ label, response, color, bg, border }) => (
+                        <button
+                          key={label}
+                          onClick={() => { sendVoiceInput(response); setFollowUpQuestion(""); }}
+                          style={{ padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer", background: bg, border: `1px solid ${border}`, color, transition: "all 0.15s" }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>*/}
                   </div>
                 )}
               </div>
@@ -459,13 +489,20 @@ export default function TutorPage() {
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, padding: "0 4px" }}>
             {mode === "standard" && (
               <>
-                <button onMouseDown={startListening} onMouseUp={stopListening} onTouchStart={startListening} onTouchEnd={stopListening} disabled={!speechSupported}
+                <button
+                  onMouseDown={handleSpeakPress}
+                  onMouseUp={handleSpeakRelease}
+                  onTouchStart={(e) => { e.preventDefault(); handleSpeakPress(); }}
+                  onTouchEnd={handleSpeakRelease}
+                  disabled={!speechSupported}
                   style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 500, cursor: "pointer", border: isListening ? "1px solid rgba(239,68,68,0.4)" : "1px solid rgba(255,255,255,0.08)", background: isListening ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.04)", color: isListening ? "#f87171" : "rgba(255,255,255,0.5)", userSelect: "none", opacity: !speechSupported ? 0.3 : 1 }}>
-                  {isListening ? <><div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", animation: "pulse 1s infinite" }} />Listening...</> : <><Mic size={12} />Hold to Speak</>}
+                  {isListening
+                    ? <><div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", animation: "pulse 1s infinite" }} />Listening...</>
+                    : <><Mic size={12} />Hold to Speak</>}
                 </button>
 
-                <button onClick={() => { setIsMuted(!isMuted); if (isSpeaking) stopSpeaking(); }}
-                  style={{ width: 34, height: 34, borderRadius: 8, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.35)" }}>
+                <button onClick={() => setIsMuted(!isMuted)}
+                  style={{ width: 34, height: 34, borderRadius: 8, background: isMuted ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.04)", border: isMuted ? "1px solid rgba(239,68,68,0.3)" : "1px solid rgba(255,255,255,0.08)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: isMuted ? "#f87171" : "rgba(255,255,255,0.35)" }}>
                   {isMuted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                 </button>
 
@@ -550,7 +587,9 @@ export default function TutorPage() {
                     <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Visual Aid</span>
                     <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", marginLeft: "auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{diagram.concept}</span>
                   </div>
-                  <div style={{ background: "#fff", padding: 4 }} dangerouslySetInnerHTML={{ __html: diagram.svg }} />
+                  <div style={{ background: "#fff", padding: 4 }}>
+                    <div dangerouslySetInnerHTML={{ __html: diagram.svg }} />
+                  </div>
                 </div>
               )}
 

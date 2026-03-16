@@ -130,7 +130,17 @@ export function useSpeech({
   );
 
   const stopSpeaking = useCallback(() => {
-    synthRef.current?.cancel();
+    if (!synthRef.current) return;
+
+    // Chrome bug: cancel() alone often doesn't stop speech.
+    // Calling cancel() twice with a small pause in between forces it to stop.
+    synthRef.current.cancel();
+    setTimeout(() => {
+      synthRef.current?.cancel();
+    }, 50);
+
+    // Detach the utterance so onend doesn't flip isSpeaking back oddly
+    utteranceRef.current = null;
     setIsSpeaking(false);
   }, []);
 
@@ -253,7 +263,7 @@ interface SpeechGrammarList {
   addFromString(string: string, weight?: number): void;
   addFromURI(src: string, weight?: number): void;
   item(index: number): SpeechGrammar;
-  [index: number]: SpeechGrammar;
+  [index: number]: SpeechGrammarList;
 }
 
 declare const SpeechGrammarList: {

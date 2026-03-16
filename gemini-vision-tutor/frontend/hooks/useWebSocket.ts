@@ -1,11 +1,5 @@
 /**
  * useWebSocket - Fixed for React StrictMode double-mount
- *
- * Root cause: React StrictMode (enabled by default in Next.js dev) mounts
- * every component TWICE. This causes useEffect to run → cleanup → run again
- * in rapid succession, creating and immediately destroying WebSockets.
- *
- * Fix: use a module-level singleton so the socket survives the double-mount.
  */
 
 import { useEffect, useRef, useCallback, useState } from "react";
@@ -28,8 +22,6 @@ interface UseWebSocketOptions {
   onDisconnect?: () => void;
 }
 
-// ── Module-level singleton ────────────────────────────────────────────────────
-// Lives outside React — survives StrictMode double-mount unmount/remount cycle
 let _socket:      WebSocket | null = null;
 let _listeners:   Set<(msg: TutorMessage) => void> = new Set();
 let _connectCbs:  Set<() => void> = new Set();
@@ -44,7 +36,6 @@ function getWsUrl(): string {
 }
 
 function connectSocket() {
-  // Already open or connecting — do nothing
   if (_connecting) return;
   if (_socket && (_socket.readyState === WebSocket.OPEN ||
                   _socket.readyState === WebSocket.CONNECTING)) return;
@@ -85,7 +76,6 @@ function connectSocket() {
     console.log(`[WS] Closed (code=${evt.code})`);
     _socket = null;
     _disconnCbs.forEach(cb => cb());
-    // Only reconnect on abnormal close (not intentional close code 1000)
     if (evt.code !== 1000) {
       scheduleReconnect();
     }
@@ -93,7 +83,6 @@ function connectSocket() {
 
   ws.onerror = () => {
     _connecting = false;
-    // onclose fires after onerror — reconnect handled there
   };
 }
 
@@ -113,13 +102,10 @@ function sendToSocket(data: object) {
   }
 }
 
-// ── React hook ────────────────────────────────────────────────────────────────
-
 export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocketOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [sessionId,   setSessionId]   = useState<string | null>(null);
 
-  // Stable refs so callbacks don't need to be in dependency arrays
   const onMessageRef    = useRef(onMessage);
   const onConnectRef    = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
@@ -128,7 +114,6 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
   onDisconnectRef.current = onDisconnect;
 
   useEffect(() => {
-    // Register this component's callbacks
     const msgCb = (msg: TutorMessage) => {
       if (msg.type === "connected" && msg.session_id) {
         setSessionId(msg.session_id as string);
@@ -151,28 +136,23 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
     _connectCbs.add(connCb);
     _disconnCbs.add(discCb);
 
-    // Sync initial state if socket already open
     if (_socket?.readyState === WebSocket.OPEN) {
       setIsConnected(true);
     }
 
-    // Start connection (idempotent — won't double-connect)
     connectSocket();
 
     return () => {
-      // Cleanup: remove this component's callbacks
-      // Do NOT close the socket — it's a singleton that outlives remounts
       _listeners.delete(msgCb);
       _connectCbs.delete(connCb);
       _disconnCbs.delete(discCb);
     };
-  }, []); // Empty deps — run once per actual mount
+  }, []);
 
   const sendFrame = useCallback((image: string, force = false) => {
-  console.log("sendFrame: socket readyState =", _socket?.readyState, "| image length =", image?.length);
-  sendToSocket({ type: "frame", image, force_reanalyze: force });
-}, []);
-  
+    console.log("sendFrame: socket readyState =", _socket?.readyState, "| image length =", image?.length);
+    sendToSocket({ type: "frame", image, force_reanalyze: force });
+  }, []);
 
   const sendVoiceInput  = useCallback((text: string) =>
     sendToSocket({ type: "voice_input", text }), []);
@@ -192,9 +172,14 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
   const send            = useCallback((data: object) =>
     sendToSocket(data), []);
 
+  // ── NEW: interrupt — stops backend mid-stream immediately ──
+  const sendInterrupt   = useCallback(() =>
+    sendToSocket({ type: "interrupt" }), []);
+
   return {
     isConnected, sessionId, send,
     sendFrame, sendVoiceInput,
     requestDiagram, requestPractice, requestNextStep, resetSession,
+    sendInterrupt,
   };
 }

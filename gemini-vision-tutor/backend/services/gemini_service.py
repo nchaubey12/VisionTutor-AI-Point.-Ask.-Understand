@@ -55,6 +55,18 @@ class GeminiService:
             system_instruction=dialogue_system
         )
 
+        # Dedicated model for diagram solving — strict JSON/equation only output
+        self.solver_model = self.genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=(
+                "You are a math solver that outputs ONLY raw JSON. "
+                "Never output prose, markdown, backticks, or explanations. "
+                "Every label and value field must contain only equations or numbers — "
+                "never sentences or descriptions. "
+                "Your entire response must start with { and end with }."
+            )
+        )
+
         logger.info(f"GeminiService initialized with model: {model_name}")
 
     def _make_config(self, temperature: float, max_tokens: int):
@@ -209,186 +221,261 @@ class GeminiService:
             if chunk.text:
                 yield chunk.text
 
-    async def generate_diagram_code(self, description: str) -> str:
+    async def generate_diagram_code(self, description: str, problem_info: dict = None) -> str:
         """
         Two-step approach:
-        1. Ask Gemini for diagram DATA as JSON (what to draw, not SVG code)
-        2. Build the SVG ourselves in Python — guaranteed complete and valid
+        1. Ask Gemini to SOLVE the problem and return solution steps as JSON
+        2. Build the SVG from those solution steps — never shows the question
         """
         logger.info(f"generate_diagram_code called for: {description[:80]}")
 
-        # Step 1: Get diagram data as JSON
-        prompt = (
-            f'For this educational concept: "{description}"\n\n'
-            "Describe a simple diagram using JSON. "
-            "Respond ONLY with raw JSON, no markdown, no code fences.\n\n"
-            "Use this exact structure:\n"
-            '{"title":"short title under 30 chars",'
-            '"type":"equation or steps or comparison or definition",'
-            '"items":['
-            '{"label":"text to show","value":"optional number or formula","color":"#3B82F6"},'
-            '{"label":"text to show","value":"optional number or formula","color":"#10B981"}'
-            '],'
-            '"explanation":"one sentence summary"}'
-            "\n\nMaximum 5 items. Keep all labels under 20 characters."
+        problem  = problem_info.get('problem', description) if problem_info else description
+        subject  = problem_info.get('subject', 'math') if problem_info else 'math'
+        approach = problem_info.get('suggested_approach', '') if problem_info else ''
+
+        # ── Step 1: Solve using dedicated solver model ────────────────────────
+        solve_prompt = (
+            f'Problem: {problem}\n\n'
+            f"Solve completely. Output this exact JSON structure — no other text:\n"
+            f'{{"title":"Solving {problem[:20]}","steps":['
+            f'{{"label":"2x+6-6=14-6","value":"2x=8","color":"#3B82F6"}},'
+            f'{{"label":"2x/2=8/2","value":"x=4","color":"#10B981"}}'
+            f'],"answer":"x = 4"}}\n\n'
+            f"Now do the same for the actual problem above.\n"
+            f"label = the equation with the operation applied (e.g. '2x+6-6=14-6')\n"
+            f"value = the simplified result (e.g. '2x=8')\n"
+            f"ONLY equations in label/value — no words whatsoever.\n"
+            f"2-4 steps max. answer = final answer only."
         )
 
         try:
-            response = await self.vision_model.generate_content_async(
-                prompt,
-                generation_config=self._make_config(0.2, 512)
+            import asyncio as _asyncio
+            solve_response = await _asyncio.wait_for(
+                self.solver_model.generate_content_async(
+                    solve_prompt,
+                    generation_config=self._make_config(0.0, 512)
+                ),
+                timeout=12.0
             )
+            raw = solve_response.text.strip()
+            logger.info(f"solution raw response: {raw[:400]}")
 
-            raw = response.text.strip()
-            logger.info(f"diagram JSON raw: {raw[:200]}")
-            data = json.loads(self._strip_fences(raw))
+            # Robust JSON extraction
+            import re as _re
+            cleaned = self._strip_fences(raw)
+            if not cleaned.startswith('{'):
+                match = _re.search(r'\{.*\}', cleaned, _re.DOTALL)
+                if match:
+                    cleaned = match.group(0)
+            solved = json.loads(cleaned)
+            logger.info(f"solution parsed OK: {solved.get('title')} — {len(solved.get('steps', []))} steps")
 
-        except Exception as e:
-            logger.warning(f"diagram JSON generation failed: {e} — using description directly")
-            # Fallback: build a simple label diagram from the description
+            colors = ["#3B82F6", "#10B981", "#8B5CF6", "#F59E0B", "#EF4444"]
+            items = []
+            for i, s in enumerate(solved.get("steps", [])[:4]):
+                label = str(s.get("label", ""))
+                value = str(s.get("value", ""))
+                # Reject prose — if label contains spaces and no = or operators, skip
+                has_equation = any(c in label for c in "=+-*/")
+                if not has_equation and len(label.split()) > 3:
+                    logger.warning(f"Skipping prose label: {label}")
+                    continue
+                items.append({
+                    "label": label,
+                    "value": value,
+                    "color": s.get("color", colors[i % len(colors)]),
+                })
+
+            if not items:
+                raise ValueError("No valid equation steps returned")
+
             data = {
-                "title": description[:30],
-                "type": "definition",
-                "items": [{"label": description[:40], "value": "", "color": "#3B82F6"}],
-                "explanation": ""
+                "title": solved.get("title", f"Solving {problem[:20]}")[:30],
+                "type": "steps",
+                "items": items,
+                "explanation": solved.get("answer", "")[:80],
             }
 
-        # Step 2: Build SVG from the JSON data — always complete and valid
+        except Exception as e:
+            logger.error(f"solve step failed: {type(e).__name__}: {e} — building fallback from approach")
+            # Better fallback: use suggested_approach split into lines if available
+            if approach:
+                fallback_items = []
+                colors = ["#3B82F6", "#10B981", "#8B5CF6", "#F59E0B", "#EF4444"]
+                for i, line in enumerate(approach.split('.')[:4]):
+                    line = line.strip()
+                    if line:
+                        fallback_items.append({"label": f"Step {i+1}", "value": line[:18], "color": colors[i % len(colors)]})
+                data = {
+                    "title": "Solution",
+                    "type": "steps",
+                    "items": fallback_items or [{"label": "See explanation", "value": "in main panel", "color": "#3B82F6"}],
+                    "explanation": approach[:80],
+                }
+            else:
+                data = {
+                    "title": "Solution",
+                    "type": "steps",
+                    "items": [{"label": "See explanation", "value": "in main panel", "color": "#3B82F6"}],
+                    "explanation": "Check the explanation panel for the full solution.",
+                }
+
         svg = self._build_svg(data, description)
         logger.info(f"generate_diagram_code final SVG length: {len(svg)}")
         return svg
 
-    def _build_svg(self, data: dict, description: str) -> str:
-        """Build a complete, valid SVG from diagram data dict."""
-        title = data.get("title", description[:30])
-        items = data.get("items", [])[:5]
-        explanation = data.get("explanation", "")
-        diagram_type = data.get("type", "steps")
+    async def generate_practice_question(self, problem_info: dict) -> dict:
+        """
+        Generate a practice question based on the same concept as the problem.
+        Returns dict with question, hint, answer.
+        Fast: single Gemini call with JSON response, 5s timeout.
+        """
+        logger.info(f"generate_practice_question for: {problem_info.get('problem', '')[:60]}")
 
-        W, H = 600, 400
+        prompt = (
+            f"A student just solved this problem:\n"
+            f"Subject: {problem_info.get('subject', 'unknown')}\n"
+            f"Problem: {problem_info.get('problem', 'unknown')}\n"
+            f"Difficulty: {problem_info.get('difficulty_level', 'unknown')}\n"
+            f"Key concepts: {', '.join(problem_info.get('key_concepts', []))}\n\n"
+            "Create ONE similar practice problem to test understanding.\n"
+            "Respond ONLY with raw JSON, no markdown, no code fences.\n"
+            "Use exactly this structure:\n"
+            '{"question":"the practice question",'
+            '"hint":"a helpful hint without giving away the answer",'
+            '"answer":"the complete worked answer"}'
+            "\n\nKeep the question similar in difficulty. Make it slightly different so they can't just copy the original answer."
+        )
+
+        import asyncio
+        try:
+            response = await asyncio.wait_for(
+                self.vision_model.generate_content_async(
+                    prompt,
+                    generation_config=self._make_config(0.7, 512)
+                ),
+                timeout=15.0
+            )
+
+            raw = response.text.strip()
+            logger.info(f"practice question raw: {raw[:200]}")
+            data = json.loads(self._strip_fences(raw))
+
+            # Validate required fields
+            return {
+                "question": data.get("question", "Try solving a similar problem."),
+                "hint":     data.get("hint", "Think about the key concepts."),
+                "answer":   data.get("answer", "Work through it step by step."),
+            }
+
+        except asyncio.TimeoutError:
+            logger.error("generate_practice_question timed out")
+            return self._fallback_practice(problem_info)
+
+        except json.JSONDecodeError as e:
+            logger.error(f"practice question JSON error: {e}")
+            return self._fallback_practice(problem_info)
+
+        except Exception as e:
+            logger.error(f"generate_practice_question error: {e}", exc_info=True)
+            return self._fallback_practice(problem_info)
+
+    def _fallback_practice(self, problem_info: dict) -> dict:
+        subject = problem_info.get("subject", "this topic")
+        return {
+            "question": f"Try another problem similar to: {problem_info.get('problem', 'the one you just solved')[:80]}",
+            "hint": f"Use the same approach you learned for {subject}.",
+            "answer": "Work through it step by step using the same method.",
+        }
+
+    def _build_svg(self, data: dict, description: str) -> str:
+        """Clean minimal layout — white background, no colored boxes."""
+        title       = data.get("title", "Solution")[:40]
+        items       = data.get("items", [])[:5]
+        explanation = data.get("explanation", "")
+        n           = len(items)
+
+        ITEM_H = 70
+        GAP    = 8
+        TOP    = 56
+        BOTTOM = 60 if explanation else 16
+        W      = 560
+        H      = TOP + n * (ITEM_H + GAP) + BOTTOM
+        H      = max(H, 200)
+
         lines = [
-            f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
-            f'xmlns="http://www.w3.org/2000/svg">',
+            f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">',
             f'<rect width="{W}" height="{H}" fill="#ffffff"/>',
             # Title
-            f'<text x="{W//2}" y="40" text-anchor="middle" '
-            f'font-family="Arial" font-size="20" font-weight="bold" fill="#1e293b">'
+            f'<text x="{W//2}" y="36" text-anchor="middle" '
+            f'font-family="Arial,sans-serif" font-size="18" font-weight="bold" fill="#1e293b">'
             f'{_esc(title)}</text>',
+            # Divider under title
+            f'<line x1="24" y1="46" x2="{W-24}" y2="46" stroke="#e2e8f0" stroke-width="1.5"/>',
         ]
 
-        if not items:
-            # No items — just show description as text
+        for i, item in enumerate(items):
+            label = str(item.get("label", ""))  # e.g. "2x+6-6=14-6"
+            value = str(item.get("value", ""))  # e.g. "2x=8"
+            iy    = TOP + i * (ITEM_H + GAP)
+
+            # Step label header — "Step 1" in grey
             lines.append(
-                f'<text x="{W//2}" y="{H//2}" text-anchor="middle" '
-                f'font-family="Arial" font-size="16" fill="#475569">'
-                f'{_esc(description[:60])}</text>'
+                f'<text x="24" y="{iy + 18}" '
+                f'font-family="Arial,sans-serif" font-size="12" font-weight="bold" fill="#94a3b8">'
+                f'Step {i+1}</text>'
             )
-        elif diagram_type in ("equation", "comparison") and len(items) >= 2:
-            # Side-by-side comparison layout
-            box_w, box_h = 220, 100
-            gap = 40
-            total_w = 2 * box_w + gap
-            start_x = (W - total_w) // 2
-            y = 80
 
-            for i, item in enumerate(items[:2]):
-                x = start_x + i * (box_w + gap)
-                color = item.get("color", "#3B82F6")
-                label = item.get("label", "")[:20]
-                value = item.get("value", "")[:20]
-                lines += [
-                    f'<rect x="{x}" y="{y}" width="{box_w}" height="{box_h}" '
-                    f'rx="12" fill="{color}" fill-opacity="0.15" '
-                    f'stroke="{color}" stroke-width="2"/>',
-                    f'<text x="{x + box_w//2}" y="{y + 35}" text-anchor="middle" '
-                    f'font-family="Arial" font-size="14" fill="#475569">{_esc(label)}</text>',
-                    f'<text x="{x + box_w//2}" y="{y + 65}" text-anchor="middle" '
-                    f'font-family="Arial" font-size="22" font-weight="bold" fill="{color}">'
-                    f'{_esc(value)}</text>',
-                ]
-
-            # Arrow between boxes
-            ax1 = start_x + box_w + 4
-            ax2 = start_x + box_w + gap - 4
-            ay = y + box_h // 2
+            # Working equation (label) in medium grey
+            label_text = _esc(label[:52])
             lines.append(
-                f'<line x1="{ax1}" y1="{ay}" x2="{ax2}" y2="{ay}" '
-                f'stroke="#94a3b8" stroke-width="2" '
-                f'marker-end="url(#arrowhead)"/>'
+                f'<text x="24" y="{iy + 36}" '
+                f'font-family="Arial,sans-serif" font-size="14" fill="#64748b">'
+                f'{label_text}</text>'
             )
-            # Arrow marker def
-            lines.insert(1,
-                '<defs><marker id="arrowhead" markerWidth="8" markerHeight="6" '
-                'refX="8" refY="3" orient="auto">'
-                '<polygon points="0 0, 8 3, 0 6" fill="#94a3b8"/>'
-                '</marker></defs>'
+            if len(label) > 52:
+                lines.append(
+                    f'<text x="24" y="{iy + 52}" '
+                    f'font-family="Arial,sans-serif" font-size="14" fill="#64748b">'
+                    f'{_esc(label[52:104])}</text>'
+                )
+
+            # Result (value) in bold black — the simplified equation
+            val_y = iy + 56 if len(label) <= 52 else iy + 68
+            lines.append(
+                f'<text x="24" y="{val_y}" '
+                f'font-family="Arial,sans-serif" font-size="20" font-weight="bold" fill="#1e293b">'
+                f'{_esc(value[:48])}</text>'
             )
 
-            # Remaining items as steps below
-            if len(items) > 2:
-                step_y = y + box_h + 40
-                for j, item in enumerate(items[2:]):
-                    color = item.get("color", "#8B5CF6")
-                    label = item.get("label", "")[:30]
-                    value = item.get("value", "")[:20]
-                    ix = W // 2
-                    lines += [
-                        f'<rect x="{ix - 180}" y="{step_y + j*60}" width="360" height="44" '
-                        f'rx="8" fill="{color}" fill-opacity="0.1" stroke="{color}" stroke-width="1.5"/>',
-                        f'<text x="{ix}" y="{step_y + j*60 + 26}" text-anchor="middle" '
-                        f'font-family="Arial" font-size="14" fill="#334155">'
-                        f'{_esc(label)} {_esc(value)}</text>',
-                    ]
+            # Divider between steps
+            if i < n - 1:
+                div_y = iy + ITEM_H + GAP - 2
+                lines.append(
+                    f'<line x1="24" y1="{div_y}" x2="{W-24}" y2="{div_y}" '
+                    f'stroke="#f1f5f9" stroke-width="1"/>'
+                )
 
-        else:
-            # Vertical steps layout
-            item_h = 52
-            total_h = len(items) * item_h + (len(items) - 1) * 12
-            start_y = max(70, (H - total_h - 60) // 2)
-            colors = ["#3B82F6", "#10B981", "#8B5CF6", "#F59E0B", "#EF4444"]
-
-            for i, item in enumerate(items):
-                color = item.get("color", colors[i % len(colors)])
-                label = item.get("label", "")[:35]
-                value = item.get("value", "")[:20]
-                iy = start_y + i * (item_h + 12)
-                cx = 60
-                # Step circle
-                lines += [
-                    f'<circle cx="{cx}" cy="{iy + item_h//2}" r="20" '
-                    f'fill="{color}" fill-opacity="0.2" stroke="{color}" stroke-width="2"/>',
-                    f'<text x="{cx}" y="{iy + item_h//2 + 6}" text-anchor="middle" '
-                    f'font-family="Arial" font-size="16" font-weight="bold" fill="{color}">'
-                    f'{i+1}</text>',
-                    # Box
-                    f'<rect x="92" y="{iy}" width="470" height="{item_h}" '
-                    f'rx="8" fill="{color}" fill-opacity="0.08" '
-                    f'stroke="{color}" stroke-width="1.5"/>',
-                    f'<text x="112" y="{iy + 22}" '
-                    f'font-family="Arial" font-size="14" fill="#334155">{_esc(label)}</text>',
-                ]
-                if value:
-                    lines.append(
-                        f'<text x="112" y="{iy + 40}" '
-                        f'font-family="Arial" font-size="13" fill="{color}">'
-                        f'{_esc(value)}</text>'
-                    )
-                # Connector line between steps
-                if i < len(items) - 1:
-                    line_y1 = iy + item_h
-                    line_y2 = iy + item_h + 12
-                    lines.append(
-                        f'<line x1="{cx}" y1="{line_y1}" x2="{cx}" y2="{line_y2}" '
-                        f'stroke="#cbd5e1" stroke-width="2" stroke-dasharray="3,3"/>'
-                    )
-
-        # Explanation text at bottom
+        # Final answer
         if explanation:
-            lines.append(
-                f'<text x="{W//2}" y="{H - 15}" text-anchor="middle" '
-                f'font-family="Arial" font-size="12" fill="#94a3b8">'
-                f'{_esc(explanation[:80])}</text>'
-            )
+            ans_y = TOP + n * (ITEM_H + GAP) + 10
+            lines += [
+                f'<line x1="24" y1="{ans_y - 6}" x2="{W-24}" y2="{ans_y - 6}" stroke="#e2e8f0" stroke-width="1.5"/>',
+                # Green tick circle
+                f'<circle cx="36" cy="{ans_y + 14}" r="12" fill="#10b981"/>',
+                f'<text x="36" y="{ans_y + 19}" text-anchor="middle" '
+                f'font-family="Arial,sans-serif" font-size="14" font-weight="bold" fill="#ffffff">✓</text>',
+                # Answer text
+                f'<text x="56" y="{ans_y + 10}" '
+                f'font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="#10b981">Answer:</text>',
+                f'<text x="110" y="{ans_y + 10}" '
+                f'font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="#1e293b">{_esc(explanation[:60])}</text>',
+            ]
+            if len(explanation) > 60:
+                lines.append(
+                    f'<text x="56" y="{ans_y + 26}" '
+                    f'font-family="Arial,sans-serif" font-size="13" fill="#1e293b">{_esc(explanation[60:120])}</text>'
+                )
 
         lines.append('</svg>')
         return "\n".join(lines)

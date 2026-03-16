@@ -14,6 +14,9 @@ _gemini    = None
 _firestore = None
 _storage   = None
 
+# ── Interrupt flags keyed by session_id ──────────────────────────────────────
+_interrupted: dict[str, bool] = {}
+
 
 def init_services(gemini, firestore):
     global _gemini, _firestore, _storage
@@ -74,6 +77,8 @@ async def tutor_websocket(websocket: WebSocket):
     })
     logger.info("DEBUG STEP 7: connected message sent ✓")
 
+    _interrupted[session_id] = False
+
     async def send(data: dict):
         try:
             await websocket.send_json(data)
@@ -107,8 +112,15 @@ async def tutor_websocket(websocket: WebSocket):
             msg_type = msg.get("type", "")
             logger.info(f"DEBUG LOOP: msg_type={msg_type} session={session_id[:8]}")
 
+            # ── INTERRUPT ─────────────────────────────────────────────
+            if msg_type == "interrupt":
+                _interrupted[session_id] = True
+                dialogue_agent.clear_active_explanation(session_id)
+                await send({"type": "interrupted"})
+                logger.info(f"Interrupt received — stopping stream for {session_id[:8]}")
+
             # ── FRAME ─────────────────────────────────────────────────
-            if msg_type == "frame":
+            elif msg_type == "frame":
                 b64 = msg.get("image", "")
                 logger.info(f"DEBUG FRAME: image present={bool(b64)}, length={len(b64)}")
                 if not b64:
@@ -176,9 +188,9 @@ async def tutor_websocket(websocket: WebSocket):
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
+                _interrupted[session_id] = False  # reset so answer streams fully
                 prev = dialogue_agent.get_active_explanation(session_id)
                 dialogue_agent.clear_active_explanation(session_id)
-                await send({"type": "interrupted"})
                 await send({"type": "response_start"})
                 full = ""
                 try:
@@ -207,8 +219,7 @@ async def tutor_websocket(websocket: WebSocket):
                     continue
                 await send({"type": "generating_diagram"})
                 try:
-                    svg = await teaching_agent.generate_diagram_for_concept(session_id, concept)
-                    # ── DEBUG: log first 300 chars of SVG so we can see what's rendering ──
+                    svg = await teaching_agent.generate_diagram_for_concept(session_id, concept, problem_info=problem_info)
                     logger.info(f"DEBUG DIAGRAM: svg length={len(svg) if svg else 0}")
                     logger.info(f"DEBUG DIAGRAM: svg first 300 chars: {svg[:300] if svg else 'NONE'}")
                     if svg:
@@ -252,6 +263,7 @@ async def tutor_websocket(websocket: WebSocket):
                 problem_info  = {}
                 teaching_plan = {}
                 step          = 0
+                _interrupted[session_id] = False
                 vision_agent.clear_cache(session_id)
                 dialogue_agent.clear_active_explanation(session_id)
                 try:
@@ -266,12 +278,19 @@ async def tutor_websocket(websocket: WebSocket):
     except Exception as e:
         logger.error(f"DEBUG: Unhandled loop error [{session_id[:8]}]: {type(e).__name__}: {e}", exc_info=True)
 
+    finally:
+        _interrupted.pop(session_id, None)
+
     logger.info(f"DEBUG: WS session ended: {session_id[:8]}")
 
 
 async def _do_explain(send, teaching_agent, dialogue_agent,
                       session_id, problem_info, teaching_plan, step):
     logger.info(f"DEBUG _do_explain: step={step}")
+
+    # Reset interrupt flag at start of every new explanation
+    _interrupted[session_id] = False
+
     steps     = teaching_plan.get("steps", [])
     step_data = steps[step] if step < len(steps) else {}
 
@@ -299,8 +318,14 @@ async def _do_explain(send, teaching_agent, dialogue_agent,
 
     words = text.split()
     for i in range(0, len(words), 8):
+        if _interrupted.get(session_id):
+            logger.info(f"_do_explain: interrupted mid-stream for {session_id[:8]}")
+            return
         chunk = " ".join(words[i:i + 8]) + " "
         await send({"type": "text_chunk", "text": chunk})
+
+    if _interrupted.get(session_id):
+        return
 
     # ── Send diagram simultaneously with explanation if generated ──
     if response.get("diagram_svg"):

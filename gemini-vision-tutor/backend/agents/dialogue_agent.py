@@ -32,6 +32,27 @@ class DialogueAgent:
                 return intent
         return "general"
 
+    def _is_related_to_problem(self, question: str, problem_info: dict) -> bool:
+        """
+        Check if the student's question is related to the current problem.
+        If not, we should answer it as a standalone question without
+        dragging the math problem context into the response.
+        """
+        if not problem_info:
+            return False
+
+        subject  = (problem_info.get('subject', '') or '').lower()
+        problem  = (problem_info.get('problem', '') or '').lower()
+        concepts = [c.lower() for c in problem_info.get('key_concepts', [])]
+        q        = question.lower()
+
+        # Check if any key term from the current problem appears in the question
+        subject_words = [w for w in subject.split() if len(w) > 3]
+        problem_words = [w for w in problem.split() if len(w) > 3]
+        all_terms     = subject_words + problem_words + concepts
+
+        return any(term in q for term in all_terms)
+
     async def handle_user_input(
         self,
         session_id: str,
@@ -90,18 +111,35 @@ class DialogueAgent:
                 yield chunk.text
 
     async def _handle_question(self, session_id: str, question: str, problem_info: dict) -> AsyncIterator[str]:
-        history = await self.firestore.get_conversation_history(session_id)
-        history_text = "\n".join(
-            f"{'Student' if t['role']=='user' else 'Tutor'}: {t['content'][:100]}"
-            for t in history[-6:]
-        )
-        prompt = (
-            f'Student question: "{question}"\n\n'
-            f"Problem: {problem_info.get('problem', 'unknown') if problem_info else 'unknown'}\n"
-            f"Subject: {problem_info.get('subject', 'unknown') if problem_info else 'unknown'}\n\n"
-            f"Recent conversation:\n{history_text}\n\n"
-            "Answer clearly and encouragingly in 2-4 sentences (plain text, no markdown)."
-        )
+        related = self._is_related_to_problem(question, problem_info)
+        logger.info(f"_handle_question: related_to_problem={related} | '{question[:60]}'")
+
+        if related and problem_info:
+            # Question is about the current problem — include context
+            history = await self.firestore.get_conversation_history(session_id)
+            history_text = "\n".join(
+                f"{'Student' if t['role']=='user' else 'Tutor'}: {t['content'][:100]}"
+                for t in history[-4:]
+            )
+            prompt = (
+                f'Student question: "{question}"\n\n'
+                f"Current problem: {problem_info.get('problem', '')}\n"
+                f"Subject: {problem_info.get('subject', '')}\n\n"
+                f"Recent conversation:\n{history_text}\n\n"
+                "Answer the student's question directly and clearly in 2-4 sentences. "
+                "Plain text only, no markdown. Do NOT redirect them back to the problem unless it is directly relevant to their question."
+            )
+        else:
+            # Question is unrelated to the current problem — answer it standalone
+            # Do NOT inject the math problem into the prompt at all
+            prompt = (
+                f'Student question: "{question}"\n\n'
+                "Answer this question directly and clearly in 2-4 sentences. "
+                "Plain text only, no markdown. "
+                "Do NOT mention any previous math problems or redirect to other topics. "
+                "Just answer what was asked."
+            )
+
         response = await self.gemini.dialogue_model.generate_content_async(
             prompt,
             generation_config=genai.GenerationConfig(temperature=0.7, max_output_tokens=300),
