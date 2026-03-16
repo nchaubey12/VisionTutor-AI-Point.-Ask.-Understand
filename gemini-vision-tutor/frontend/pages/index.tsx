@@ -25,22 +25,26 @@ export default function TutorPage() {
   const [diagram, setDiagram]                   = useState<DiagramData | null>(null);
   const [practice, setPractice]                 = useState<PracticeQuestion | null>(null);
   const [followUpQuestion, setFollowUpQuestion] = useState("");
+  const [typeInput, setTypeInput]               = useState("");
+  interface ChatMessage { role: "user" | "agent"; text: string; isStreaming?: boolean; }
+  const [chatMessages, setChatMessages]         = useState<ChatMessage[]>([]);
   const [isMuted, setIsMuted]                   = useState(false);
   const [showPractice, setShowPractice]         = useState(false);
   const [showAnswer, setShowAnswer]             = useState(false);
   const [showDiagramSolution, setShowDiagramSolution] = useState(false);
   const [isAnalyzing, setIsAnalyzing]           = useState(false);
-  const [keepCameraOn, setKeepCameraOn]         = useState(false);
   const [isExplaining, setIsExplaining]         = useState(false);
   const [isGenerating, setIsGenerating]         = useState(false);
   const [liveTranscript, setLiveTranscript]     = useState("");
+  interface LiveChatMessage { role: "user" | "agent"; text: string; isStreaming?: boolean; }
+  const [liveChatMessages, setLiveChatMessages] = useState<LiveChatMessage[]>([]);
+  const currentLiveAgentRef = useRef<string>("");
+  const newLiveTurnRef      = useRef<boolean>(true);
   const [statusMsg, setStatusMsg]               = useState("Point camera at homework, then click Analyze");
   const [cameraFrameColor, setCameraFrameColor] = useState<"default"|"green"|"red">("default");
   const explanationRef    = useRef<HTMLDivElement>(null);
   const wasInterruptedRef = useRef<boolean>(false);
 
-  // ── Mute: pause speech. Unmute: resume from where it paused. ─────────────
-  // Uses pause()/resume() so speech position is preserved — no restart.
   useEffect(() => {
     if (isMuted) {
       window.speechSynthesis?.pause();
@@ -50,9 +54,22 @@ export default function TutorPage() {
   }, [isMuted]);
 
   const { videoRef, canvasRef, isActive, error: cameraError, startCamera, stopCamera, captureFrame } = useWebcam();
+  useEffect(() => { }, []);
+
+  const toggleStandardCamera = useCallback(() => {
+    if (isActive) {
+      stopCamera();
+    } else {
+      startCamera();
+    }
+  }, [isActive, startCamera, stopCamera]);
 
   const { isListening, isSpeaking, isSupported: speechSupported, startListening, stopListening, speak, stopSpeaking } = useSpeech({
-    onTranscript: (text) => { setStatusMsg(`You said: "${text}"`); sendVoiceInput(text); },
+    onTranscript: (text) => {
+      setStatusMsg(`You said: "${text}"`);
+      setChatMessages(prev => [...prev, { role: "user", text }]);
+      sendVoiceInput(text);
+    },
   });
 
   const handleMessage = useCallback((message: TutorMessage) => {
@@ -69,12 +86,28 @@ export default function TutorPage() {
         wasInterruptedRef.current = false;
         setIsExplaining(true); setCurrentStep(message.step as number);
         setStepTitle(message.step_title as string || `Step ${(message.step as number) + 1}`);
-        setExplanation(""); break;
-      case "text_chunk": setExplanation(prev => prev + (message.text as string)); break;
+        setExplanation("");
+        setChatMessages(prev => [...prev, { role: "agent", text: "", isStreaming: true }]);
+        break;
+      case "text_chunk":
+        setExplanation(prev => prev + (message.text as string));
+        setChatMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.role === "agent") updated[updated.length - 1] = { ...last, text: last.text + (message.text as string) };
+          return updated;
+        });
+        break;
       case "explanation_complete": {
         setIsExplaining(false);
         const ft = message.full_text as string;
         setExplanation(ft);
+        setChatMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.role === "agent") updated[updated.length - 1] = { role: "agent", text: ft, isStreaming: false };
+          return updated;
+        });
         if (message.follow_up) setFollowUpQuestion(message.follow_up as string);
         setStatusMsg("Explanation complete");
         if (!isMuted && ft && !wasInterruptedRef.current) speak(ft);
@@ -83,7 +116,9 @@ export default function TutorPage() {
       }
       case "diagram": setDiagram({ svg: message.svg as string, concept: message.concept as string }); setIsGenerating(false); setShowDiagramSolution(false); break;
       case "interrupted": stopSpeaking(); setIsExplaining(false); wasInterruptedRef.current = true; break;
-      case "response_start": wasInterruptedRef.current = false; setExplanation(""); setIsExplaining(true); setStepTitle("Answering..."); break;
+      case "response_start": wasInterruptedRef.current = false; setExplanation(""); setIsExplaining(true); setStepTitle("Answering...");
+        setChatMessages(prev => [...prev, { role: "agent", text: "", isStreaming: true }]);
+        break;
       case "generating_diagram": setIsGenerating(true); break;
       case "generating_practice": setIsGenerating(true); break;
       case "practice_question":
@@ -92,6 +127,7 @@ export default function TutorPage() {
       case "session_reset":
         setProblemInfo(null); setExplanation(""); setDiagram(null); setPractice(null);
         setCurrentStep(0); setShowPractice(false); setCameraFrameColor("default");
+        setChatMessages([]); setFollowUpQuestion("");
         setStatusMsg("Session reset"); break;
       case "error":
         setIsAnalyzing(false); setIsExplaining(false); setIsGenerating(false);
@@ -106,13 +142,32 @@ export default function TutorPage() {
     onDisconnect: () => setStatusMsg("Reconnecting..."),
   });
 
-  // ── Live agent callbacks ──────────────────────────────────────────────────
   const handleInterrupted = useCallback(() => {
     setStatusMsg("Listening...");
+    setLiveChatMessages(prev => {
+      const updated = [...prev];
+      const last = updated[updated.length - 1];
+      if (last?.role === "agent" && last.isStreaming) {
+        updated[updated.length - 1] = { ...last, isStreaming: false };
+      }
+      return updated;
+    });
+    currentLiveAgentRef.current = "";
+    newLiveTurnRef.current = true;
   }, []);
 
   const handleTurnComplete = useCallback(() => {
     setStatusMsg("Listening...");
+    setLiveChatMessages(prev => {
+      const updated = [...prev];
+      const last = updated[updated.length - 1];
+      if (last?.role === "agent" && last.isStreaming) {
+        updated[updated.length - 1] = { ...last, isStreaming: false };
+      }
+      return updated;
+    });
+    currentLiveAgentRef.current = "";
+    newLiveTurnRef.current = true;
   }, []);
 
   const {
@@ -128,13 +183,55 @@ export default function TutorPage() {
     stopMic,
     startCamera: liveStartCamera,
     stopCamera: liveStopCamera,
+    sendText: liveSendText,
   } = useLiveAgent({
     videoRef,
-    onTranscript: (text) => setLiveTranscript(prev => prev + text + " "),
+    onTranscript: (text) => {
+      if (newLiveTurnRef.current) {
+        newLiveTurnRef.current = false;
+        currentLiveAgentRef.current = text + " ";
+        setLiveChatMessages(prev => [
+          ...prev,
+          { role: "user", text: "🎤" },
+          { role: "agent", text: currentLiveAgentRef.current, isStreaming: true },
+        ]);
+      } else {
+        currentLiveAgentRef.current += text + " ";
+        setLiveChatMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.role === "agent") {
+            updated[updated.length - 1] = { role: "agent", text: currentLiveAgentRef.current, isStreaming: true };
+          }
+          return updated;
+        });
+      }
+      setLiveTranscript(prev => prev + text + " ");
+    },
     onInterrupted: handleInterrupted,
     onTurnComplete: handleTurnComplete,
-    onStatus: (msg) => setStatusMsg(msg),
   });
+
+  const prevLiveGeminiSpeakingRef = useRef(false);
+  useEffect(() => {
+    if (!prevLiveGeminiSpeakingRef.current && liveGeminiSpeaking) {
+      setLiveChatMessages(prev => [
+        ...prev,
+        { role: "user", text: "🎤" },
+        { role: "agent", text: "", isStreaming: true },
+      ]);
+    } else if (prevLiveGeminiSpeakingRef.current && !liveGeminiSpeaking) {
+      setLiveChatMessages(prev => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last?.role === "agent" && last.isStreaming) {
+          updated[updated.length - 1] = { ...last, isStreaming: false };
+        }
+        return updated;
+      });
+    }
+    prevLiveGeminiSpeakingRef.current = liveGeminiSpeaking;
+  }, [liveGeminiSpeaking]);
 
   useEffect(() => {
     if (mode !== "live" || !liveConnected) return;
@@ -146,7 +243,7 @@ export default function TutorPage() {
   }, [liveGeminiSpeaking, mode, liveConnected, isMicOn]);
 
   const switchToLive = useCallback(() => { stopSpeaking(); setMode("live"); liveConnect(); }, [stopSpeaking, liveConnect]);
-  const switchToStandard = useCallback(() => { liveDisconnect(); setMode("standard"); setLiveTranscript(""); setStatusMsg("Standard mode"); }, [liveDisconnect]);
+  const switchToStandard = useCallback(() => { liveDisconnect(); setMode("standard"); setLiveTranscript(""); setLiveChatMessages([]); currentLiveAgentRef.current = ""; setStatusMsg("Standard mode"); }, [liveDisconnect]);
 
   const handleAnalyze = useCallback(() => {
     if (!isActive || !isConnected) return;
@@ -154,10 +251,8 @@ export default function TutorPage() {
     if (!frame) return;
     setIsAnalyzing(true);
     sendFrame(frame, true);
-    if (!keepCameraOn) stopCamera();
-  }, [isActive, isConnected, captureFrame, sendFrame, keepCameraOn, stopCamera]);
+  }, [isActive, isConnected, captureFrame, sendFrame]);
 
-  // ── Hold to Speak handlers ────────────────────────────────────────────────
   const handleSpeakPress = useCallback(() => {
     wasInterruptedRef.current = true;
     stopSpeaking();
@@ -172,6 +267,14 @@ export default function TutorPage() {
     stopListening();
   }, [stopListening]);
 
+  const handleSendText = useCallback(() => {
+    const text = typeInput.trim();
+    if (!text) return;
+    setChatMessages(prev => [...prev, { role: "user", text }]);
+    sendVoiceInput(text);
+    setTypeInput("");
+  }, [typeInput, sendVoiceInput]);
+
   useEffect(() => {
     if (explanationRef.current) explanationRef.current.scrollTop = explanationRef.current.scrollHeight;
   }, [explanation, liveTranscript]);
@@ -184,7 +287,7 @@ export default function TutorPage() {
     "rgba(255,255,255,0.08)";
 
   return (
-    <div style={{ minHeight: "100vh", background: "#080810", color: "#fff", fontFamily: "'DM Sans', system-ui, sans-serif", display: "flex", flexDirection: "column" }}>
+    <div style={{ height: "100vh", maxHeight: "100vh", overflow: "hidden", background: "#080810", color: "#fff", fontFamily: "'DM Sans', system-ui, sans-serif", display: "flex", flexDirection: "column" }}>
 
       {/* Ambient bg */}
       <div style={{ position: "fixed", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
@@ -194,7 +297,7 @@ export default function TutorPage() {
       </div>
 
       {/* Header */}
-      <header style={{ position: "relative", zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 28px", height: 56, borderBottom: "1px solid rgba(255,255,255,0.06)", backdropFilter: "blur(12px)", background: "rgba(8,8,16,0.8)" }}>
+      <header style={{ position: "relative", zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 28px", height: 56, borderBottom: "1px solid rgba(255,255,255,0.06)", backdropFilter: "blur(12px)", background: "rgba(8,8,16,0.8)", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 32, height: 32, borderRadius: 10, background: "linear-gradient(135deg, #6366f1, #3b82f6)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <Brain size={16} color="#fff" />
@@ -230,21 +333,20 @@ export default function TutorPage() {
         </div>
       </header>
 
-      {/* Main */}
-      <main style={{ flex: 1, display: "flex", position: "relative", zIndex: 10, overflow: "hidden" }}>
+      {/* Main — FIX: overflow hidden so children can't escape */}
+      <main style={{ flex: 1, display: "flex", position: "relative", zIndex: 10, overflow: "hidden", minHeight: 0 }}>
 
         {/* LEFT — Camera + controls */}
-        <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column", padding: "16px 12px 16px 16px", gap: 12, borderRight: "1px solid rgba(255,255,255,0.05)" }}>
+        <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column", padding: "16px 12px 16px 16px", gap: 12, borderRight: "1px solid rgba(255,255,255,0.05)", overflowY: "auto" }}>
 
           {/* Camera */}
-          <div style={{ position: "relative", borderRadius: 16, overflow: "hidden", background: "#0d0d1a", aspectRatio: "4/3", border: `2px solid ${camBorderColor}`, transition: "border-color 0.4s" }}>
+          <div style={{ position: "relative", borderRadius: 16, overflow: "hidden", background: "#0d0d1a", aspectRatio: "4/3", border: `2px solid ${camBorderColor}`, transition: "border-color 0.4s", flexShrink: 0 }}>
             <video ref={videoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             <canvas ref={canvasRef} style={{ display: "none" }} />
 
             {!isActive && (
-              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.85)", gap: 8 }}>
-                <CameraOff size={24} color="rgba(255,255,255,0.2)" />
-                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>Camera off</span>
+              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#0d0d1a" }}>
+                <CameraOff size={28} color="rgba(255,255,255,0.1)" />
               </div>
             )}
 
@@ -280,22 +382,15 @@ export default function TutorPage() {
 
           {/* Action buttons */}
           {mode === "standard" ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={isActive ? stopCamera : startCamera}
-                  style={{ flex: "0 0 auto", padding: "11px 14px", borderRadius: 12, border: isActive ? "1px solid rgba(59,130,246,0.4)" : "1px solid rgba(255,255,255,0.08)", background: isActive ? "rgba(59,130,246,0.12)" : "rgba(255,255,255,0.04)", color: isActive ? "#60a5fa" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-                  {isActive ? <><Camera size={13} /> On</> : <><CameraOff size={13} /> Off</>}
-                </button>
-                <button onClick={handleAnalyze} disabled={isAnalyzing || !isActive || !isConnected}
-                  style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 13, cursor: isAnalyzing || !isActive || !isConnected ? "not-allowed" : "pointer", opacity: isAnalyzing || !isActive || !isConnected ? 0.5 : 1, background: isAnalyzing ? "rgba(99,102,241,0.3)" : "linear-gradient(135deg, #6366f1, #3b82f6)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, transition: "all 0.2s" }}>
-                  {isAnalyzing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Analyzing...</> : <><Zap size={14} /> Analyze Homework</>}
-                </button>
-              </div>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "0 2px" }}>
-                <input type="checkbox" checked={keepCameraOn} onChange={e => setKeepCameraOn(e.target.checked)}
-                  style={{ width: 14, height: 14, accentColor: "#6366f1", cursor: "pointer" }} />
-                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>Keep camera on after capture</span>
-              </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={handleAnalyze} disabled={isAnalyzing || !isActive || !isConnected}
+                style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 13, cursor: isAnalyzing || !isActive || !isConnected ? "not-allowed" : "pointer", opacity: isAnalyzing || !isActive || !isConnected ? 0.5 : 1, background: isAnalyzing ? "rgba(99,102,241,0.3)" : "linear-gradient(135deg, #6366f1, #3b82f6)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, transition: "all 0.2s", letterSpacing: "-0.01em" }}>
+                {isAnalyzing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Analyzing...</> : <><Zap size={14} /> Analyze</>}
+              </button>
+              <button onClick={toggleStandardCamera}
+                style={{ padding: "11px 14px", borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: "pointer", border: isActive ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)", background: isActive ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.05)", color: isActive ? "#60a5fa" : "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                {isActive ? <Camera size={13} /> : <CameraOff size={13} />}
+              </button>
             </div>
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
@@ -307,10 +402,17 @@ export default function TutorPage() {
                   ? <><Mic size={13} style={{ animation: "pulse 1.5s infinite" }} /> Mute</>
                   : <><MicOff size={13} /> Unmute</>}
               </button>
-              <button onClick={() => {
-                  if (isCameraOn) { liveStopCamera(); stopCamera(); }
-                  else { startCamera(); liveStartCamera(); }
-                }} disabled={!liveConnected}
+              <button
+                onClick={() => {
+                  if (isCameraOn) {
+                    liveStopCamera();
+                    stopCamera();
+                  } else {
+                    startCamera();
+                    liveStartCamera();
+                  }
+                }}
+                disabled={!liveConnected}
                 style={{ flex: 1, padding: "10px 0", borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: "pointer", border: isCameraOn ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)", background: isCameraOn ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.05)", color: isCameraOn ? "#60a5fa" : "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: !liveConnected ? 0.4 : 1 }}>
                 {isCameraOn ? <><Camera size={13} /> Camera On</> : <><CameraOff size={13} /> Camera Off</>}
               </button>
@@ -352,24 +454,29 @@ export default function TutorPage() {
           <p style={{ fontSize: 11, color: "rgba(255,255,255,0.22)", textAlign: "center", margin: 0, lineHeight: 1.5 }}>{statusMsg}</p>
         </div>
 
-        {/* CENTER — Main content */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "16px 12px", gap: 10, minWidth: 0 }}>
+        {/* CENTER — Main content: CSS grid guarantees input bar never moves */}
+        {/* Row 1 (auto): optional step title | Row 2 (1fr): scrollable messages | Row 3 (auto): input bar */}
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "grid", gridTemplateRows: "auto 1fr auto", overflow: "hidden" }}>
 
-          {(stepTitle || mode === "live") && (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0, padding: "0 4px" }}>
-              <div style={{ width: 3, height: 20, borderRadius: 2, background: mode === "live" ? (liveGeminiSpeaking ? "#3b82f6" : isMicOn ? "#10b981" : "rgba(255,255,255,0.15)") : "linear-gradient(180deg, #6366f1, #3b82f6)", transition: "background 0.3s" }} />
-              <h2 style={{ fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.7)", margin: 0 }}>
-                {mode === "live" ? "Live Session" : stepTitle}
-              </h2>
-              {isExplaining && <Loader2 size={12} style={{ animation: "spin 1s linear infinite", color: "#6366f1" }} />}
-              {mode === "live" && liveGeminiSpeaking && <span style={{ fontSize: 11, color: "#60a5fa" }}>Gemini speaking...</span>}
-              {mode === "live" && isMicOn && !liveGeminiSpeaking && <span style={{ fontSize: 11, color: "#10b981" }}>Listening...</span>}
-            </div>
-          )}
+          {/* Row 1 — Step title */}
+          <div style={{ padding: "16px 16px 0 16px" }}>
+            {(stepTitle || mode === "live") && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 4px", marginBottom: 8 }}>
+                <div style={{ width: 3, height: 20, borderRadius: 2, background: mode === "live" ? (liveGeminiSpeaking ? "#3b82f6" : isMicOn ? "#10b981" : "rgba(255,255,255,0.15)") : "linear-gradient(180deg, #6366f1, #3b82f6)", transition: "background 0.3s" }} />
+                <h2 style={{ fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.7)", margin: 0 }}>
+                  {mode === "live" ? "Live Session" : stepTitle}
+                </h2>
+                {isExplaining && <Loader2 size={12} style={{ animation: "spin 1s linear infinite", color: "#6366f1" }} />}
+                {mode === "live" && liveGeminiSpeaking && <span style={{ fontSize: 11, color: "#60a5fa" }}>Gemini speaking...</span>}
+                {mode === "live" && isMicOn && !liveGeminiSpeaking && <span style={{ fontSize: 11, color: "#10b981" }}>Listening...</span>}
+              </div>
+            )}
+          </div>
 
-          <div ref={explanationRef} style={{ flex: 1, overflowY: "auto", borderRadius: 16, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "20px 24px" }}>
+          {/* Row 2 — Scrollable messages: overflow: auto is on THIS div only, nothing else scrolls */}
+          <div ref={explanationRef} style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 16, padding: "12px 16px" }}>
 
-            {mode === "standard" && !explanation && !isAnalyzing && !isExplaining && (
+            {mode === "standard" && chatMessages.length === 0 && !isAnalyzing && (
               <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", gap: 28 }}>
                 <div style={{ width: 64, height: 64, borderRadius: 20, background: "linear-gradient(135deg, rgba(99,102,241,0.2), rgba(59,130,246,0.2))", border: "1px solid rgba(99,102,241,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <Sparkles size={28} color="#818cf8" />
@@ -377,7 +484,7 @@ export default function TutorPage() {
                 <div>
                   <h3 style={{ fontSize: 20, fontWeight: 700, color: "rgba(255,255,255,0.7)", margin: "0 0 8px", letterSpacing: "-0.02em" }}>Ready to Tutor</h3>
                   <p style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", maxWidth: 320, lineHeight: 1.6, margin: "0 auto" }}>
-                    Point your camera at any homework — math, science, English — and click Analyze. Or switch to Live for real-time voice.
+                    Point your camera at any homework and click Analyze, type a question below, or hold mic to speak.
                   </p>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, width: "100%", maxWidth: 400 }}>
@@ -385,7 +492,7 @@ export default function TutorPage() {
                     { icon: "📷", label: "Show homework", desc: "Point camera at your work" },
                     { icon: "⚡", label: "Instant analysis", desc: "Gemini reads it in seconds" },
                     { icon: "🎓", label: "Step-by-step", desc: "Clear explanations with visuals" },
-                    { icon: "🎙️", label: "Ask questions", desc: "Hold mic to ask anything" },
+                    { icon: "🎙️", label: "Ask questions", desc: "Type or speak anything" },
                   ].map((f, i) => (
                     <div key={i} style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", textAlign: "left" }}>
                       <div style={{ fontSize: 18, marginBottom: 4 }}>{f.icon}</div>
@@ -397,7 +504,7 @@ export default function TutorPage() {
               </div>
             )}
 
-            {mode === "standard" && isAnalyzing && !explanation && (
+            {mode === "standard" && isAnalyzing && chatMessages.length === 0 && (
               <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[0,1,2,3].map(i => (
@@ -408,38 +515,22 @@ export default function TutorPage() {
               </div>
             )}
 
-            {mode === "standard" && explanation && (
-              <div>
-                <p style={{ fontSize: 15, color: "rgba(255,255,255,0.82)", lineHeight: 1.8, margin: 0, fontWeight: 400 }}>
-                  {explanation}
-                  {isExplaining && <span style={{ display: "inline-block", width: 2, height: 16, background: "#6366f1", marginLeft: 2, verticalAlign: "middle", animation: "pulse 1s infinite" }} />}
-                </p>
-                {followUpQuestion && !isExplaining && (
-                  <div style={{ marginTop: 20, padding: "14px 16px", borderRadius: 12, background: "rgba(139,92,246,0.08)", border: "1px solid rgba(139,92,246,0.2)" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-                      <Lightbulb size={12} color="#a78bfa" />
-                      <span style={{ fontSize: 10, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.08em" }}>Check Your Understanding</span>
-                    </div>
-                    <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", margin: "0 0 12px", lineHeight: 1.6 }}>{followUpQuestion}</p>
-                    {/*<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {[
-                        //{ label: "✅ Yes, I get it!", response: `Yes, I understand. ${followUpQuestion}`, color: "#10b981", bg: "rgba(16,185,129,0.1)", border: "rgba(16,185,129,0.3)" },
-                        //{ label: "🤔 Not really", response: `I'm not sure I fully understand. Can you explain it differently? The question was: ${followUpQuestion}`, color: "#f59e0b", bg: "rgba(245,158,11,0.1)", border: "rgba(245,158,11,0.3)" },
-                        //{ label: "💡 Show example", response: `Can you give me a real-world example specifically about: ${followUpQuestion}`, color: "#a78bfa", bg: "rgba(139,92,246,0.1)", border: "rgba(139,92,246,0.3)" },
-                      ].map(({ label, response, color, bg, border }) => (
-                        <button
-                          key={label}
-                          onClick={() => { sendVoiceInput(response); setFollowUpQuestion(""); }}
-                          style={{ padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer", background: bg, border: `1px solid ${border}`, color, transition: "all 0.15s" }}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>*/}
+            {/* Chat messages */}
+            {mode === "standard" && chatMessages.map((msg, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
+                {msg.role === "agent" && (
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: "linear-gradient(135deg, #6366f1, #3b82f6)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginRight: 8, marginTop: 2 }}>
+                    <Brain size={13} color="#fff" />
                   </div>
                 )}
+                <div style={{ maxWidth: "75%", padding: "10px 14px", borderRadius: msg.role === "user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px", background: msg.role === "user" ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.05)", border: msg.role === "user" ? "1px solid rgba(99,102,241,0.3)" : "1px solid rgba(255,255,255,0.07)" }}>
+                  <p style={{ fontSize: 14, color: msg.role === "user" ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.82)", lineHeight: 1.7, margin: 0 }}>
+                    {msg.text}
+                    {msg.isStreaming && <span style={{ display: "inline-block", width: 2, height: 14, background: "#6366f1", marginLeft: 2, verticalAlign: "middle", animation: "pulse 1s infinite" }} />}
+                  </p>
+                </div>
               </div>
-            )}
+            ))}
 
             {mode === "live" && !liveConnected && !liveStarting && (
               <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", gap: 20 }}>
@@ -460,72 +551,103 @@ export default function TutorPage() {
               </div>
             )}
 
-            {mode === "live" && liveConnected && (
-              <div style={{ height: "100%" }}>
-                {liveTranscript ? (
-                  <p style={{ fontSize: 15, color: "rgba(255,255,255,0.8)", lineHeight: 1.8, margin: 0 }}>{liveTranscript}</p>
+            {/* Live chat bubbles */}
+            {mode === "live" && liveConnected && liveChatMessages.length === 0 && (
+              <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
+                <div style={{ width: 80, height: 80, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${liveGeminiSpeaking ? "#3b82f6" : isMicOn ? "#10b981" : "rgba(255,255,255,0.08)"}`, background: liveGeminiSpeaking ? "rgba(59,130,246,0.1)" : isMicOn ? "rgba(16,185,129,0.1)" : "rgba(255,255,255,0.03)", transition: "all 0.3s", animation: (liveGeminiSpeaking || isMicOn) ? "pulse 2s ease-in-out infinite" : "none" }}>
+                  {liveGeminiSpeaking ? <Volume2 size={32} color="#60a5fa" /> : isMicOn ? <Mic size={32} color="#10b981" /> : <Radio size={32} color="rgba(255,255,255,0.15)" />}
+                </div>
+                <p style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.3)", margin: 0 }}>
+                  {liveGeminiSpeaking ? "Gemini is speaking..." : isMicOn ? "Listening..." : "Turn on Mic to start"}
+                </p>
+              </div>
+            )}
+
+            {mode === "live" && liveConnected && liveChatMessages.map((msg, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start", alignItems: "flex-end", gap: 8 }}>
+                {msg.role === "agent" && (
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: "linear-gradient(135deg, #10b981, #3b82f6)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginBottom: 2 }}>
+                    <Radio size={13} color="#fff" />
+                  </div>
+                )}
+                {msg.text === "🎤" ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: "18px 18px 4px 18px", background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.25)" }}>
+                    <Mic size={12} color="#10b981" />
+                    <span style={{ fontSize: 12, color: "#10b981", fontStyle: "italic" }}>You spoke</span>
+                  </div>
+                ) : msg.role === "agent" && msg.text === "" ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "12px 16px", borderRadius: "18px 18px 18px 4px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                    <Volume2 size={13} color="#60a5fa" />
+                    <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                      {[0,1,2,3].map(j => (
+                        <div key={j} style={{ width: 3, height: 16, borderRadius: 2, background: "#60a5fa", animation: "bounce 0.8s ease-in-out infinite", animationDelay: `${j * 0.12}s` }} />
+                      ))}
+                    </div>
+                  </div>
                 ) : (
-                  <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
-                    <div style={{ width: 80, height: 80, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${liveGeminiSpeaking ? "#3b82f6" : isMicOn ? "#10b981" : "rgba(255,255,255,0.08)"}`, background: liveGeminiSpeaking ? "rgba(59,130,246,0.1)" : isMicOn ? "rgba(16,185,129,0.1)" : "rgba(255,255,255,0.03)", transition: "all 0.3s", animation: (liveGeminiSpeaking || isMicOn) ? "pulse 2s ease-in-out infinite" : "none" }}>
-                      {liveGeminiSpeaking ? <Volume2 size={32} color="#60a5fa" style={{ animation: "pulse 1.5s infinite" }} /> :
-                       isMicOn ? <Mic size={32} color="#10b981" style={{ animation: "pulse 1.5s infinite" }} /> :
-                       <Radio size={32} color="rgba(255,255,255,0.15)" />}
-                    </div>
-                    <div style={{ textAlign: "center" }}>
-                      <p style={{ fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.4)", margin: "0 0 4px" }}>
-                        {liveGeminiSpeaking ? "Gemini is speaking..." : isMicOn ? "Listening to you..." : "Turn on Mic to start"}
-                      </p>
-                      <p style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", margin: 0 }}>
-                        {!isMicOn && !isCameraOn ? "Use buttons on the left" : isMicOn && !isCameraOn ? "Enable camera to show homework" : "Speak naturally — interrupt anytime"}
-                      </p>
-                    </div>
+                  <div style={{ maxWidth: "75%", padding: "10px 14px", borderRadius: msg.role === "user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px", background: msg.role === "user" ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.05)", border: msg.role === "user" ? "1px solid rgba(16,185,129,0.3)" : "1px solid rgba(255,255,255,0.07)" }}>
+                    <p style={{ fontSize: 14, color: "rgba(255,255,255,0.85)", lineHeight: 1.7, margin: 0 }}>
+                      {msg.text}
+                      {msg.isStreaming && <span style={{ display: "inline-block", width: 2, height: 14, background: "#10b981", marginLeft: 2, verticalAlign: "middle", animation: "pulse 1s infinite" }} />}
+                    </p>
                   </div>
                 )}
               </div>
-            )}
+            ))}
           </div>
 
-          {/* Action bar */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, padding: "0 4px" }}>
+          {/* Row 3 — Input bar: always at bottom, never scrolls, never moves */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 16px 16px", background: "#080810", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
             {mode === "standard" && (
               <>
-                <button
-                  onMouseDown={handleSpeakPress}
-                  onMouseUp={handleSpeakRelease}
-                  onTouchStart={(e) => { e.preventDefault(); handleSpeakPress(); }}
-                  onTouchEnd={handleSpeakRelease}
-                  disabled={!speechSupported}
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 500, cursor: "pointer", border: isListening ? "1px solid rgba(239,68,68,0.4)" : "1px solid rgba(255,255,255,0.08)", background: isListening ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.04)", color: isListening ? "#f87171" : "rgba(255,255,255,0.5)", userSelect: "none", opacity: !speechSupported ? 0.3 : 1 }}>
-                  {isListening
-                    ? <><div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", animation: "pulse 1s infinite" }} />Listening...</>
-                    : <><Mic size={12} />Hold to Speak</>}
-                </button>
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 24, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                  <input
+                    value={typeInput}
+                    onChange={e => setTypeInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendText(); } }}
+                    placeholder="Ask anything..."
+                    style={{ flex: 1, background: "none", border: "none", outline: "none", color: "rgba(255,255,255,0.8)", fontSize: 13, fontFamily: "inherit" }}
+                  />
+                  <button
+                    onMouseDown={handleSpeakPress}
+                    onMouseUp={handleSpeakRelease}
+                    onTouchStart={(e) => { e.preventDefault(); handleSpeakPress(); }}
+                    onTouchEnd={handleSpeakRelease}
+                    disabled={!speechSupported}
+                    style={{ width: 28, height: 28, borderRadius: "50%", border: "none", background: isListening ? "rgba(239,68,68,0.2)" : "rgba(255,255,255,0.08)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: isListening ? "#f87171" : "rgba(255,255,255,0.4)", flexShrink: 0 }}>
+                    <Mic size={13} />
+                  </button>
+                  <button
+                    onClick={handleSendText}
+                    disabled={!typeInput.trim()}
+                    style={{ width: 28, height: 28, borderRadius: "50%", border: "none", background: typeInput.trim() ? "linear-gradient(135deg, #6366f1, #3b82f6)" : "rgba(255,255,255,0.06)", cursor: typeInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: typeInput.trim() ? "#fff" : "rgba(255,255,255,0.2)", flexShrink: 0, transition: "all 0.2s" }}>
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
 
                 <button onClick={() => setIsMuted(!isMuted)}
                   style={{ width: 34, height: 34, borderRadius: 8, background: isMuted ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.04)", border: isMuted ? "1px solid rgba(239,68,68,0.3)" : "1px solid rgba(255,255,255,0.08)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: isMuted ? "#f87171" : "rgba(255,255,255,0.35)" }}>
                   {isMuted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                 </button>
 
-                <div style={{ flex: 1 }} />
-
                 {problemInfo && !isExplaining && currentStep < totalSteps - 1 && (
                   <button onClick={requestNextStep}
                     style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc" }}>
-                    Next Step <ChevronRight size={12} />
+                    Next <ChevronRight size={12} />
                   </button>
                 )}
 
                 {problemInfo && (
                   <button onClick={() => { requestDiagram(problemInfo.problem); setIsGenerating(true); }} disabled={isGenerating}
-                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 500, cursor: "pointer", border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.04)", color: "rgba(255,255,255,0.5)", opacity: isGenerating ? 0.4 : 1 }}>
-                    {isGenerating ? <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={11} />} Diagram
+                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 12px", borderRadius: 10, fontSize: 12, fontWeight: 500, cursor: "pointer", border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.04)", color: "rgba(255,255,255,0.5)", opacity: isGenerating ? 0.4 : 1 }}>
+                    {isGenerating ? <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={11} />}
                   </button>
                 )}
 
                 {problemInfo && (
                   <button onClick={() => { requestPractice(); setIsGenerating(true); }} disabled={isGenerating}
-                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "1px solid rgba(16,185,129,0.25)", background: "rgba(16,185,129,0.08)", color: "#10b981", opacity: isGenerating ? 0.4 : 1 }}>
-                    <BookOpen size={11} /> Practice
+                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "1px solid rgba(16,185,129,0.25)", background: "rgba(16,185,129,0.08)", color: "#10b981", opacity: isGenerating ? 0.4 : 1 }}>
+                    <BookOpen size={11} />
                   </button>
                 )}
               </>
@@ -533,10 +655,42 @@ export default function TutorPage() {
 
             {mode === "live" && liveConnected && (
               <>
-                <div style={{ flex: 1 }} />
-                <button onClick={() => setLiveTranscript("")}
-                  style={{ padding: "7px 14px", borderRadius: 10, fontSize: 11, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", cursor: "pointer", color: "rgba(255,255,255,0.35)" }}>
-                  Clear transcript
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 24, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                  <input
+                    value={typeInput}
+                    onChange={e => setTypeInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && !e.shiftKey && typeInput.trim()) {
+                        e.preventDefault();
+                        const text = typeInput.trim();
+                        setLiveChatMessages(prev => [...prev, { role: "user", text }]);
+                        liveSendText?.(text);
+                        setTypeInput("");
+                      }
+                    }}
+                    placeholder="Type a message..."
+                    style={{ flex: 1, background: "none", border: "none", outline: "none", color: "rgba(255,255,255,0.8)", fontSize: 13, fontFamily: "inherit" }}
+                  />
+                  <button
+                    onClick={() => {
+                      const text = typeInput.trim();
+                      if (!text) return;
+                      setLiveChatMessages(prev => [...prev, { role: "user", text }]);
+                      liveSendText?.(text);
+                      setTypeInput("");
+                    }}
+                    disabled={!typeInput.trim()}
+                    style={{ width: 28, height: 28, borderRadius: "50%", border: "none", background: typeInput.trim() ? "linear-gradient(135deg, #10b981, #3b82f6)" : "rgba(255,255,255,0.06)", cursor: typeInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: typeInput.trim() ? "#fff" : "rgba(255,255,255,0.2)", flexShrink: 0, transition: "all 0.2s" }}>
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8, background: isMicOn ? "rgba(16,185,129,0.1)" : "rgba(255,255,255,0.04)", border: isMicOn ? "1px solid rgba(16,185,129,0.3)" : "1px solid rgba(255,255,255,0.08)" }}>
+                  {isMicOn && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981", animation: "pulse 1s infinite", display: "inline-block" }} />}
+                  <span style={{ fontSize: 11, color: isMicOn ? "#10b981" : "rgba(255,255,255,0.3)" }}>{isMicOn ? "Live" : "Mic off"}</span>
+                </div>
+                <button onClick={() => setLiveChatMessages([])}
+                  style={{ padding: "7px 12px", borderRadius: 10, fontSize: 11, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", cursor: "pointer", color: "rgba(255,255,255,0.35)" }}>
+                  Clear
                 </button>
               </>
             )}
@@ -652,6 +806,7 @@ export default function TutorPage() {
 
       <style jsx global>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+        html, body { height: 100%; overflow: hidden; margin: 0; padding: 0; }
         @keyframes scan { 0% { top: 0; opacity: 1; } 95% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
