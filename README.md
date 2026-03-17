@@ -481,7 +481,67 @@ useLiveAgent.ts opens Gemini Live session
 `Gemini 2.5 Flash` · `Gemini Live API` · `Real-time AI tutoring` · `Multimodal AI` · `Multi-agent pipeline` · `WebSockets` · `FastAPI` · `Next.js` · `Firebase Firestore` · `Google Cloud Run` · `Vision AI` · `EdTech` · `Live Agents` · `Barge-in support` · `Terraform IaC` · `Responsible AI` · `Smart education`
 
 ---
+## 🌐 Live Backend (Cloud Deployment)
 
+This project is currently deployed on **Google Cloud Run** using the Gemini Live API.
+
+### 🔗 Backend URL
+
+```
+https://vision-tutor-backend-1039191031908.us-central1.run.app
+```
+
+---
+
+## ⚙️ Using the Live Backend
+
+To connect the frontend to the deployed backend, update your frontend `.env` file:
+
+```env
+NEXT_PUBLIC_WS_URL=wss://vision-tutor-backend-1039191031908.us-central1.run.app/ws/tutor
+NEXT_PUBLIC_LIVE_WS_URL=wss://vision-tutor-backend-1039191031908.us-central1.run.app/ws/live
+```
+
+Then restart the frontend:
+
+```bash
+npm run dev
+```
+
+---
+
+## 🖥️ Switching Back to Local Development
+
+If you want to run everything locally, revert your `.env`:
+
+```env
+NEXT_PUBLIC_WS_URL=ws://localhost:8080/ws/tutor
+NEXT_PUBLIC_LIVE_WS_URL=ws://localhost:8080/ws/live
+```
+
+---
+
+## ⚠️ Temporary Deployment Notice
+
+> This cloud deployment is **temporary** and is kept live only for **hackathon evaluation purposes**.
+
+* The backend uses a **personal Gemini API key**
+* To prevent misuse and unexpected billing, the service will be:
+
+  * ⏳ **Available during evaluation period only**
+  * ❌ **Shut down after evaluation is completed**
+
+If the service is unavailable, please run the backend locally using the instructions above.
+
+---
+
+## ☁️ Deployment Stack
+
+* **Google Cloud Run**
+* **FastAPI backend**
+* **Gemini Live API (WebSocket streaming)**
+* **Realtime audio + vision processing**
+---
 ## 👥 Team
 
 Built with curiosity, caffeine, and a belief that every student deserves a patient tutor — for the **Gemini Live Agent Challenge**.
